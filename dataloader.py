@@ -1,13 +1,15 @@
 from torch.utils.data import Dataset
+
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
+
 
 class RecformerTrainDataset(Dataset):
     def __init__(self, user2train, collator: FinetuneDataCollatorWithPadding):
 
-        '''
+        """
         user2train: dict of sequence data, user--> item sequence
-        '''
-        
+        """
+
         self.user2train = user2train
         self.collator = collator
         self.users = sorted(user2train.keys())
@@ -19,13 +21,12 @@ class RecformerTrainDataset(Dataset):
 
         user = self.users[index]
         seq = self.user2train[user]
-        
+
         return seq
 
     def collate_fn(self, data):
 
-        return self.collator([{'items': line} for line in data])
-
+        return self.collator([{"items": line} for line in data])
 
 
 class RecformerEvalDataset(Dataset):
@@ -49,9 +50,9 @@ class RecformerEvalDataset(Dataset):
         user = self.users[index]
         seq = self.user2train[user] if self.mode == "val" else self.user2train[user] + self.user2val[user]
         label = self.user2val[user] if self.mode == "val" else self.user2test[user]
-        
+
         return seq, label
 
     def collate_fn(self, data):
 
-        return self.collator([{'items': line[0], 'label': line[1]} for line in data])
+        return self.collator([{"items": line[0], "label": line[1]} for line in data])

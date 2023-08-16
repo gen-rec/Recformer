@@ -1,11 +1,13 @@
 import json
+
 import torch
 import torch.nn as nn
 
 MAX_VAL = 1e4
 
+
 def read_json(path, as_int=False):
-    with open(path, 'r') as f:
+    with open(path, "r") as f:
         raw = json.load(f)
         if as_int:
             data = dict((int(key), value) for (key, value) in raw.items())
@@ -13,7 +15,6 @@ def read_json(path, as_int=False):
             data = dict((key, value) for (key, value) in raw.items())
         del raw
         return data
-
 
 
 class AverageMeter(object):
@@ -40,6 +41,7 @@ class AverageMeter(object):
     def __format__(self, format):
         return "{self.val:{format}} ({self.avg:{format}})".format(self=self, format=format)
 
+
 class AverageMeterSet(object):
     def __init__(self, meters=None):
         self.meters = meters if meters else {}
@@ -60,16 +62,16 @@ class AverageMeterSet(object):
         for meter in self.meters.values():
             meter.reset()
 
-    def values(self, format_string='{}'):
+    def values(self, format_string="{}"):
         return {format_string.format(name): meter.val for name, meter in self.meters.items()}
 
-    def averages(self, format_string='{}'):
+    def averages(self, format_string="{}"):
         return {format_string.format(name): meter.avg for name, meter in self.meters.items()}
 
-    def sums(self, format_string='{}'):
+    def sums(self, format_string="{}"):
         return {format_string.format(name): meter.sum for name, meter in self.meters.items()}
 
-    def counts(self, format_string='{}'):
+    def counts(self, format_string="{}"):
         return {format_string.format(name): meter.count for name, meter in self.meters.items()}
 
 
@@ -78,31 +80,27 @@ class Ranker(nn.Module):
         super().__init__()
         self.ks = metrics_ks
         self.ce = nn.CrossEntropyLoss()
-        
+
     def forward(self, scores, labels):
         labels = labels.squeeze()
-        
+
         try:
             loss = self.ce(scores, labels).item()
         except:
             print(scores.size())
             print(labels.size())
             loss = 0.0
-        
-        predicts = scores[torch.arange(scores.size(0)), labels].unsqueeze(-1) # gather perdicted values
-        
+
+        predicts = scores[torch.arange(scores.size(0)), labels].unsqueeze(-1)  # gather perdicted values
+
         valid_length = (scores > -MAX_VAL).sum(-1).float()
         rank = (predicts < scores).sum(-1).float()
         res = []
         for k in self.ks:
             indicator = (rank < k).float()
-            res.append(
-                ((1 / torch.log2(rank+2)) * indicator).mean().item() # ndcg@k
-            ) 
-            res.append(
-                indicator.mean().item() # hr@k
-            )
-        res.append((1 / (rank+1)).mean().item()) # MRR
-        res.append((1 - (rank/valid_length)).mean().item()) # AUC
+            res.append(((1 / torch.log2(rank + 2)) * indicator).mean().item())  # ndcg@k
+            res.append(indicator.mean().item())  # hr@k
+        res.append((1 / (rank + 1)).mean().item())  # MRR
+        res.append((1 - (rank / valid_length)).mean().item())  # AUC
 
         return res + [loss]

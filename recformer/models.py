@@ -1,12 +1,11 @@
 import logging
-from typing import List, Union, Optional, Tuple
 from dataclasses import dataclass
+from typing import List, Union, Optional, Tuple
 
 import torch
-import torch.nn as nn
 import torch.distributed as dist
+import torch.nn as nn
 from torch.nn import CrossEntropyLoss
-
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
     LongformerPreTrainedModel,
@@ -14,7 +13,6 @@ from transformers.models.longformer.modeling_longformer import (
     LongformerBaseModelOutputWithPooling,
     LongformerLMHead
 )
-
 
 logger = logging.getLogger(__name__)
 
