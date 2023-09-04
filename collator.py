@@ -78,8 +78,8 @@ class PretrainDataCollatorWithPadding:
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids])
+                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
+                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
             features.append(feature_seq)
 
         return features
@@ -261,6 +261,7 @@ class FinetuneDataCollatorWithPadding:
         token_type_ids: (batch_size, seq_len)
         attention_mask: (batch_size, seq_len)
         global_attention_mask: (batch_size, seq_len)
+        attr_type_ids: (batch_size, seq_len)
         """
 
         batch_item_seq, labels = self.sample_train_data(batch_item_ids)
@@ -297,8 +298,8 @@ class FinetuneDataCollatorWithPadding:
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids])
+                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
+                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
             features.append(feature_seq)
 
         return features
@@ -369,8 +370,8 @@ class EvalDataCollatorWithPadding:
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids])
+                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
+                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
             features.append(feature_seq)
 
         return features

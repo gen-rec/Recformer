@@ -1,11 +1,23 @@
+from collections import defaultdict
+
 import torch
 from transformers import LongformerTokenizer
+
+
+class IntFactory:
+    def __init__(self):
+        self.counter = 0
+
+    def __call__(self) -> int:
+        self.counter += 1
+        return self.counter
 
 
 class RecformerTokenizer(LongformerTokenizer):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, config=None):
         cls.config = config
+        cls.attr_map: defaultdict[str, int] = defaultdict(IntFactory())  # Mapping attribute name to id
         return super().from_pretrained(pretrained_model_name_or_path)
 
     def __call__(self, items, pad_to_max=False, return_tensor=False):
@@ -40,10 +52,10 @@ class RecformerTokenizer(LongformerTokenizer):
 
         input_ids = []
         token_type_ids = []
+        attr_type = []  # 1 for title, 2 for brand, etc.  0 is ignored
         item = list(item.items())[: self.config.max_attr_num]  # truncate attribute number
 
         for attribute in item:
-
             attr_name, attr_value = attribute
 
             name_tokens = self.item_tokenize(attr_name)
@@ -57,9 +69,13 @@ class RecformerTokenizer(LongformerTokenizer):
             attr_type_ids = [1] * len(name_tokens)
             attr_type_ids += [2] * len(value_tokens)
             attr_type_ids = attr_type_ids[: self.config.max_attr_length]
-            token_type_ids += attr_type_ids
+            attr_type_ = [self.attr_map[attr_name]] * len(attr_tokens)
+            attr_type_ = attr_type_[: self.config.max_attr_length]
 
-        return input_ids, token_type_ids
+            token_type_ids += attr_type_ids
+            attr_type += attr_type_
+
+        return input_ids, token_type_ids, attr_type
 
     def encode(self, items, encode_item=True):
         """
@@ -73,25 +89,27 @@ class RecformerTokenizer(LongformerTokenizer):
         input_ids = [self.bos_token_id]
         item_position_ids = [0]
         token_type_ids = [0]
+        attr_type_ids = [0]
 
         for item_idx, item in enumerate(items):
 
             if encode_item:
 
-                item_input_ids, item_token_type_ids = self.encode_item(item)
+                item_input_ids, item_token_type_ids, item_attr_type_ids = self.encode_item(item)
 
             else:
-
-                item_input_ids, item_token_type_ids = item
+                item_input_ids, item_token_type_ids, item_attr_type_ids = item
 
             input_ids += item_input_ids
             token_type_ids += item_token_type_ids
+            attr_type_ids += item_attr_type_ids
 
             item_position_ids += [item_idx + 1] * len(item_input_ids)  # item_idx + 1 make idx starts from 1 (0 for <s>)
 
         input_ids = input_ids[: self.config.max_token_num]
         item_position_ids = item_position_ids[: self.config.max_token_num]
         token_type_ids = token_type_ids[: self.config.max_token_num]
+        attr_type_ids = attr_type_ids[: self.config.max_token_num]
 
         attention_mask = [1] * len(input_ids)
         global_attention_mask = [0] * len(input_ids)
@@ -103,6 +121,7 @@ class RecformerTokenizer(LongformerTokenizer):
             "token_type_ids": token_type_ids,
             "attention_mask": attention_mask,
             "global_attention_mask": global_attention_mask,
+            "attr_type_ids": attr_type_ids,
         }
 
     def padding(self, item_batch, pad_to_max):
@@ -117,6 +136,7 @@ class RecformerTokenizer(LongformerTokenizer):
         batch_token_type_ids = []
         batch_attention_mask = []
         batch_global_attention_mask = []
+        batch_attr_type_ids = []
 
         for items in item_batch:
 
@@ -125,6 +145,7 @@ class RecformerTokenizer(LongformerTokenizer):
             token_type_ids = items["token_type_ids"]
             attention_mask = items["attention_mask"]
             global_attention_mask = items["global_attention_mask"]
+            item_attr_type_ids = items["attr_type_ids"]
 
             length_to_pad = max_length - len(input_ids)
 
@@ -133,12 +154,14 @@ class RecformerTokenizer(LongformerTokenizer):
             token_type_ids += [3] * length_to_pad
             attention_mask += [0] * length_to_pad
             global_attention_mask += [0] * length_to_pad
+            item_attr_type_ids += [0] * length_to_pad
 
             batch_input_ids.append(input_ids)
             batch_item_position_ids.append(item_position_ids)
             batch_token_type_ids.append(token_type_ids)
             batch_attention_mask.append(attention_mask)
             batch_global_attention_mask.append(global_attention_mask)
+            batch_attr_type_ids.append(item_attr_type_ids)
 
         return {
             "input_ids": batch_input_ids,
@@ -146,6 +169,7 @@ class RecformerTokenizer(LongformerTokenizer):
             "token_type_ids": batch_token_type_ids,
             "attention_mask": batch_attention_mask,
             "global_attention_mask": batch_global_attention_mask,
+            "attr_type_ids": batch_attr_type_ids,
         }
 
     def batch_encode(self, item_batch, encode_item=True, pad_to_max=False):

@@ -1,7 +1,6 @@
 import json
 import os
 from argparse import ArgumentParser
-from multiprocessing import Pool
 from pathlib import Path
 
 import torch
@@ -19,7 +18,7 @@ from utils import read_json, AverageMeterSet, Ranker
 
 def load_data(args):
 
-    train = read_json(os.path.join(args.data_path, args.train_file), True)
+    train: dict[str, list[int]] = read_json(os.path.join(args.data_path, args.train_file), True)
     val = read_json(os.path.join(args.data_path, args.dev_file), True)
     test = read_json(os.path.join(args.data_path, args.test_file), True)
     item_meta_dict = json.load(open(os.path.join(args.data_path, args.meta_file)))
@@ -42,9 +41,9 @@ def _par_tokenize_doc(doc):
 
     item_id, item_attr = doc
 
-    input_ids, token_type_ids = tokenizer_glb.encode_item(item_attr)
+    input_ids, token_type_ids, attr_type_ids = tokenizer_glb.encode_item(item_attr)
 
-    return item_id, input_ids, token_type_ids
+    return item_id, input_ids, token_type_ids, attr_type_ids
 
 
 def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
@@ -202,6 +201,7 @@ def main():
     config.max_token_num = 1024
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
+    config.pooler_type = "attribute"
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
     global tokenizer_glb
@@ -215,20 +215,19 @@ def main():
     path_output.mkdir(exist_ok=True, parents=True)
     path_ckpt = path_output / args.ckpt
 
-    path_tokenized_items = dir_preprocess / f"tokenized_items_{path_corpus.name}"
+    path_tokenized_items = dir_preprocess / f"tokenized_items_{path_corpus.name}_attribute"
 
     if path_tokenized_items.exists():
         print(f"[Preprocessor] Use cache: {path_tokenized_items}")
     else:
         print(f"Loading attribute data {path_corpus}")
-        pool = Pool(processes=args.preprocessing_num_workers)
-        pool_func = pool.imap(func=_par_tokenize_doc, iterable=item_meta_dict.items())
-        doc_tuples = list(tqdm(pool_func, total=len(item_meta_dict), ncols=100, desc=f"[Tokenize] {path_corpus}"))
+        doc_tuples = [
+            _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+        ]
         tokenized_items = {
-            item2id[item_id]: [input_ids, token_type_ids] for item_id, input_ids, token_type_ids in doc_tuples
+            item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
+            for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
         }
-        pool.close()
-        pool.join()
 
         torch.save(tokenized_items, path_tokenized_items)
 
@@ -256,7 +255,7 @@ def main():
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}"
+    path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}_attribute"
     if path_item_embeddings.exists():
         print(f"[Item Embeddings] Use cache: {path_tokenized_items}")
     else:
