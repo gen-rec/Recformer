@@ -187,7 +187,7 @@ class RecformerPooler(nn.Module):
             attribute_pooled.append(attr_pooled)
 
         attribute_pooled = torch.stack(attribute_pooled, dim=1)  # (bs, attr_num, hidden_size)
-        attribute_pooled = torch.mean(attribute_pooled, dim=1)  # (bs, hidden_size)
+        attribute_pooled = torch.max(attribute_pooled, dim=1).values  # (bs, hidden_size)
 
         return attribute_pooled
 
