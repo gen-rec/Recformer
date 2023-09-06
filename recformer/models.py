@@ -159,7 +159,12 @@ class RecformerPooler(nn.Module):
         self.pooler_type = config.pooler_type
 
     def forward(
-        self, attention_mask: torch.Tensor, hidden_states: torch.Tensor, attr_type_ids: torch.Tensor | None = None
+        self,
+        attention_mask: torch.Tensor,
+        hidden_states: torch.Tensor,
+        attr_type_ids: torch.Tensor,
+        item_position_ids: torch.Tensor,
+        return_cls_hidden_state: bool = False,
     ) -> torch.Tensor:
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
@@ -168,28 +173,42 @@ class RecformerPooler(nn.Module):
         # attr_type_ids: (bs, seq_len)
 
         assert self.pooler_type == "attribute", "Only attribute pooler is supported."
-        assert attr_type_ids is not None, "Attribute type ids must be provided."
+
+        if return_cls_hidden_state:
+            return hidden_states[:, 0, :]  # (bs, hidden_size)
 
         batch_size = attr_type_ids.size(0)
         attr_max = attr_type_ids.max()
 
-        attribute_pooled = []
+        num_items = item_position_ids.clone()
+        num_items[num_items == 50] = -100
+        num_items = torch.max(num_items, dim=1).values  # (bs, )
+        items_max = num_items.max()
 
-        for attr_id in range(1, attr_max + 1):
-            attr_mask = torch.eq(attr_type_ids, attr_id)  # (bs, seq_len)
+        # Create boolean masks for attribute and item
+        # attr_mask  (bs, attr_num, seq_len)
+        # item_mask  (bs, item_num, seq_len)
+        # attr_item_mask  (bs, attr_num, items_max, seq_len)
+        attr_mask = torch.eq(
+            attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
+        )  # (bs, attr_num, seq_len)
+        item_mask = torch.eq(
+            item_position_ids.unsqueeze(1),
+            torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
+        )
+        attr_item_mask = torch.logical_and(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
 
-            attr_pooled = []
-            for i in range(batch_size):
-                attr_pooled.append(hidden_states[i, attr_mask[i]].mean(dim=0))  # (hidden_size)
+        # Select hidden_state for each item and each attribute
+        # Vectorized implementation
+        # attr_item_mask  (bs, attr_num, items_max, seq_len)  Boolean mask
+        # hidden_states  (bs, seq_len, hidden_size)
+        # hidden_states_pooled  (bs, attr_num, items_max, hidden_size)
+        hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
+        hidden_states_pooled[~attr_item_mask] = torch.nan
+        # (bs, attr_num, items_max, seq_len, hidden_size)
+        hidden_states_pooled = hidden_states_pooled.nanmean(dim=3)  # (bs, attr_num, items_max, hidden_size)
 
-            attr_pooled = torch.stack(attr_pooled, dim=0)  # (bs, hidden_size)
-
-            attribute_pooled.append(attr_pooled)
-
-        attribute_pooled = torch.stack(attribute_pooled, dim=1)  # (bs, attr_num, hidden_size)
-        attribute_pooled = torch.max(attribute_pooled, dim=1).values  # (bs, hidden_size)
-
-        return attribute_pooled
+        return hidden_states_pooled
 
 
 class RecformerModel(LongformerPreTrainedModel):
@@ -261,7 +280,10 @@ class RecformerModel(LongformerPreTrainedModel):
             if position_ids is not None:
                 # pad with position_id = pad_token_id as in modeling_roberta.RobertaEmbeddings
                 position_ids = nn.functional.pad(position_ids, (0, padding_len), value=pad_token_id)
-            if item_position_ids is not None:
+            if item_position_ids is None:
+                unpadded_item_position_ids = None
+            else:
+                unpadded_item_position_ids = item_position_ids
                 item_position_ids = nn.functional.pad(item_position_ids, (0, padding_len), value=pad_token_id)
 
             if inputs_embeds is not None:
@@ -277,8 +299,10 @@ class RecformerModel(LongformerPreTrainedModel):
                 attention_mask, (0, padding_len), value=False
             )  # no attention on the padding tokens
             token_type_ids = nn.functional.pad(token_type_ids, (0, padding_len), value=0)  # pad with token_type_id = 0
+        else:
+            unpadded_item_position_ids = item_position_ids
 
-        return padding_len, input_ids, attention_mask, token_type_ids, position_ids, item_position_ids, inputs_embeds
+        return padding_len, input_ids, attention_mask, token_type_ids, position_ids, item_position_ids, inputs_embeds, unpadded_item_position_ids
 
     def _merge_to_attention_mask(self, attention_mask: torch.Tensor, global_attention_mask: torch.Tensor):
         # longformer self attention expects attention mask to have 0 (no attn), 1 (local attn), 2 (global attn)
@@ -342,6 +366,7 @@ class RecformerModel(LongformerPreTrainedModel):
             position_ids,
             item_position_ids,
             inputs_embeds,
+            unpadded_item_position_ids,
         ) = self._pad_to_window_size(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -376,7 +401,16 @@ class RecformerModel(LongformerPreTrainedModel):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-        pooled_output = self.pooler(attention_mask, sequence_output, attr_type_ids) if self.pooler is not None else None
+        pooled_output = (
+            self.pooler(
+                attention_mask=attention_mask,
+                hidden_states=sequence_output,
+                attr_type_ids=attr_type_ids,
+                item_position_ids=unpadded_item_position_ids,
+            )
+            if self.pooler is not None
+            else None
+        )
 
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
@@ -570,18 +604,21 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.post_init()
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
-        self.item_embedding = nn.Embedding(num_embeddings=self.config.item_num, embedding_dim=self.config.hidden_size)
-        if embeddings is not None:
-            self.item_embedding = nn.Embedding.from_pretrained(embeddings, freeze=True)
-            print("Initalize item embeddings from vectors.")
+        if embeddings is None:
+            raise ValueError("embeddings must be provided.")
+
+        self.item_embedding = embeddings.clone()
+        self.item_embedding.requires_grad = False
 
     def similarity_score(self, pooler_output, candidates=None):
-        if candidates is None:
-            candidate_embeddings = self.item_embedding.weight.unsqueeze(0)  # (1, num_items, hidden_size)
-        else:
-            candidate_embeddings = self.item_embedding(candidates)  # (batch_size, candidates, hidden_size)
-        pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, hidden_size)
-        return self.sim(pooler_output, candidate_embeddings)
+        if candidates is not None:
+            raise NotImplementedError("Negative sampling disabled")
+
+        candidate_embeddings = self.item_embedding
+        pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
+        sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
+
+        return sim
 
     def forward(
         self,

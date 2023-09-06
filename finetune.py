@@ -69,7 +69,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
             item_embeddings.append(outputs.pooler_output.detach())
 
-    item_embeddings = torch.cat(item_embeddings, dim=0)  # .cpu()
+    item_embeddings = torch.cat(item_embeddings, dim=0)  # (bs, attr_num, 1, hidden_size)
 
     return item_embeddings
 
@@ -88,7 +88,22 @@ def eval(model, dataloader, args):
         labels = labels.to(args.device)
 
         with torch.no_grad():
-            scores = model(**batch)
+            scores = model(**batch)  # (bs, |I|, num_attr, items_max)
+
+        # Reduce session length
+        if args.session_reduce_method == "maxsim":
+            # Replace NaN with -inf
+            scores[torch.isnan(scores)] = -float("inf")
+            scores = scores.max(dim=-1).values  # (bs, |I|, num_attr)
+        elif args.session_reduce_method == "mean":
+            scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
+        else:
+            raise ValueError("Unknown session reduce method.")
+
+        # Reduce attribute
+        scores = scores.mean(dim=-1)  # (bs, |I|)
+
+        assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
         res = ranker(scores, labels)
 
@@ -186,6 +201,8 @@ def main():
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
 
+    parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
+
     args = parser.parse_args()
     print(args)
     seed_everything(42)
@@ -255,15 +272,10 @@ def main():
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}_attribute"
-    if path_item_embeddings.exists():
-        print(f"[Item Embeddings] Use cache: {path_tokenized_items}")
-    else:
-        print(f"Encoding items.")
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-        torch.save(item_embeddings, path_item_embeddings)
-
-    item_embeddings = torch.load(path_item_embeddings)
+    # path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}_attribute"
+    # if path_item_embeddings.exists():
+    print(f"Encoding items.")
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
