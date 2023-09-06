@@ -20,6 +20,9 @@ class LitWrapper(pl.LightningModule):
     def training_step(self, batch, batch_idx):
 
         outputs = self(**batch)
+
+        self.log("train/loss", outputs.loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
         return outputs.loss
 
     def validation_step(self, batch, batch_idx):
@@ -32,7 +35,9 @@ class LitWrapper(pl.LightningModule):
         if total_num > 0:
             accuracy = correct_num / total_num
 
-        self.log_dict({"val_loss": loss, "accuracy": accuracy}, on_epoch=True, prog_bar=True)
+        self.log_dict(
+            {"val/loss": loss, "val/accuracy": accuracy}, on_epoch=True, prog_bar=True, logger=True, sync_dist=True
+        )
 
     def configure_optimizers(self):
         model = self.model

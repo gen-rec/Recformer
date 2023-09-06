@@ -1,12 +1,16 @@
 import argparse
 import json
 import logging
+from datetime import datetime
 from multiprocessing import Pool
 from pathlib import Path
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, ModelSummary, EarlyStopping
+from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers.wandb import WandbLogger
+from pytorch_lightning.strategies import DeepSpeedStrategy
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
@@ -34,7 +38,7 @@ parser.add_argument("--mlm_probability", type=float, default=0.15)
 parser.add_argument("--batch_size", type=int, default=2)
 parser.add_argument("--learning_rate", type=float, default=5e-5)
 parser.add_argument("--valid_step", type=int, default=2000)
-parser.add_argument("--log_step", type=int, default=2000)
+parser.add_argument("--log_step", type=int, default=50)
 parser.add_argument("--device", type=int, default=1)
 parser.add_argument("--fp16", action="store_true")
 parser.add_argument("--ckpt", type=str, default=None)
@@ -55,6 +59,7 @@ def _par_tokenize_doc(doc):
 
 
 def main():
+    torch.set_float32_matmul_precision("medium")
 
     args = parser.parse_args()
     print(args)
@@ -121,9 +126,20 @@ def main():
 
     model = LitWrapper(pytorch_model, learning_rate=args.learning_rate)
 
-    checkpoint_callback = ModelCheckpoint(
-        save_top_k=5, monitor="accuracy", mode="max", filename="{epoch}-{accuracy:.4f}"
-    )
+    checkpoint_callback = [
+        ModelCheckpoint(save_top_k=5, monitor="accuracy", mode="max", filename="{epoch}-{accuracy:.4f}"),
+        ModelSummary(max_depth=2),
+        EarlyStopping(monitor="accuracy", mode="max", patience=5),
+    ]
+
+    loggers = [
+        WandbLogger(
+            project="Recformer",
+            entity="gen-rec",
+            name=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+        ),
+        CSVLogger(save_dir=args.output_dir, name="Recformer"),
+    ]
 
     trainer = Trainer(
         accelerator="gpu",
@@ -134,9 +150,12 @@ def main():
         default_root_dir=args.output_dir,
         gradient_clip_val=1.0,
         log_every_n_steps=args.log_step,
-        precision=16 if args.fp16 else 32,
-        strategy="deepspeed_stage_2",
-        callbacks=[checkpoint_callback],
+        precision="16-mixed" if args.fp16 else 32,
+        strategy=DeepSpeedStrategy(
+            stage=2,
+        ),
+        logger=loggers,
+        callbacks=checkpoint_callback,
     )
 
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=dev_loader, ckpt_path=args.ckpt)
