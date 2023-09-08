@@ -10,9 +10,10 @@ class RecformerTrainDataset(Dataset):
         user2train: dict of sequence data, user--> item sequence
         """
 
-        self.user2train = user2train
+        # Filter out sessions with only length one
+        self.user2train = {k: v for k, v in user2train.items() if len(v) > 1}
         self.collator = collator
-        self.users = sorted(user2train.keys())
+        self.users = sorted(self.user2train.keys())
 
     def __len__(self):
         return len(self.users)
