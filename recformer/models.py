@@ -103,39 +103,77 @@ class RecformerEmbeddings(nn.Module):
             config.max_position_embeddings, config.hidden_size, padding_idx=self.padding_idx
         )
 
+        self.original_embedding = config.original_embedding
+
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
     ):
-        if position_ids is None:
+        def original_forward():
+            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
+
+            if position_ids is None:
+                if input_ids is not None:
+                    # Create the position ids from the input token ids. Any padded tokens remain padded.
+                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+                else:
+                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+
             if input_ids is not None:
-                # Create the position ids from the input token ids. Any padded tokens remain padded.
-                position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+                input_shape = input_ids.size()
             else:
-                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+                input_shape = inputs_embeds.size()[:-1]
 
-        if input_ids is not None:
-            input_shape = input_ids.size()
+            if token_type_ids is None:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
+
+            if inputs_embeds is None:
+                inputs_embeds = self.word_embeddings(input_ids)
+            position_embeddings = self.position_embeddings(position_ids)
+            token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+            embeddings = inputs_embeds + position_embeddings + token_type_embeddings
+            embeddings = self.LayerNorm(embeddings)
+            embeddings = self.dropout(embeddings)
+            return embeddings
+
+        def recformer_forward():
+            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
+
+            if position_ids is None:
+                if input_ids is not None:
+                    # Create the position ids from the input token ids. Any padded tokens remain padded.
+                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+                else:
+                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+
+            if input_ids is not None:
+                input_shape = input_ids.size()
+            else:
+                input_shape = inputs_embeds.size()[:-1]
+
+            seq_length = input_shape[1]
+
+            if position_ids is None:
+                position_ids = self.position_ids[:, :seq_length]
+
+            if token_type_ids is None:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+
+            if inputs_embeds is None:
+                inputs_embeds = self.word_embeddings(input_ids)
+            position_embeddings = self.position_embeddings(position_ids)
+            item_position_embeddings = self.item_position_embeddings(item_position_ids)
+            token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+            embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
+            embeddings = self.LayerNorm(embeddings)
+            embeddings = self.dropout(embeddings)
+            return embeddings
+
+        if self.original_embedding:
+            return original_forward()
         else:
-            input_shape = inputs_embeds.size()[:-1]
-
-        seq_length = input_shape[1]
-
-        if position_ids is None:
-            position_ids = self.position_ids[:, :seq_length]
-
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
-
-        if inputs_embeds is None:
-            inputs_embeds = self.word_embeddings(input_ids)
-        position_embeddings = self.position_embeddings(position_ids)
-        item_position_embeddings = self.item_position_embeddings(item_position_ids)
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-        embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-        return embeddings
+            return recformer_forward()
 
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):
         """
@@ -216,7 +254,9 @@ class RecformerPooler(nn.Module):
 
             # hidden_states  (bs, seq_len, hidden_size)
             # hidden_states_pooled  (bs, items_max, hidden_size)
-            hidden_states_pooled = hidden_states.unsqueeze(1) * item_mask.unsqueeze(-1)  # (bs, item_num, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states.unsqueeze(1) * item_mask.unsqueeze(
+                -1
+            )  # (bs, item_num, seq_len, hidden_size)
             hidden_states_pooled[~item_mask] = torch.nan  # (bs, items_max, seq_len, hidden_size)
             hidden_states_pooled = hidden_states_pooled.nanmean(dim=2)  # (bs, items_max, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, items_max, hidden_size)
@@ -330,7 +370,16 @@ class RecformerModel(LongformerPreTrainedModel):
         else:
             unpadded_item_position_ids = item_position_ids
 
-        return padding_len, input_ids, attention_mask, token_type_ids, position_ids, item_position_ids, inputs_embeds, unpadded_item_position_ids
+        return (
+            padding_len,
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            position_ids,
+            item_position_ids,
+            inputs_embeds,
+            unpadded_item_position_ids,
+        )
 
     def _merge_to_attention_mask(self, attention_mask: torch.Tensor, global_attention_mask: torch.Tensor):
         # longformer self attention expects attention mask to have 0 (no attn), 1 (local attn), 2 (global attn)

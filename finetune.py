@@ -30,6 +30,7 @@ def load_config_tokenizer(args, item2id):
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.session_reduce_method = args.session_reduce_method
     config.pooler_type = args.pooler_type
+    config.original_embedding = args.original_embedding
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
     return config, tokenizer
 
