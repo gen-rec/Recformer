@@ -16,30 +16,25 @@ from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPaddin
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
-from utils import read_json, AverageMeterSet, Ranker
+from utils import read_json, AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
-
-
-def load_data(args):
-
-    train: dict[str, list[int]] = read_json(os.path.join(args.data_path, args.train_file), True)
-    val = read_json(os.path.join(args.data_path, args.dev_file), True)
-    test = read_json(os.path.join(args.data_path, args.test_file), True)
-    item_meta_dict = json.load(open(os.path.join(args.data_path, args.meta_file)))
-
-    item2id = read_json(os.path.join(args.data_path, args.item2id_file))
-    id2item = {v: k for k, v in item2id.items()}
-
-    item_meta_dict_filted = dict()
-    for k, v in item_meta_dict.items():
-        if k in item2id:
-            item_meta_dict_filted[k] = v
-
-    return train, val, test, item_meta_dict_filted, item2id, id2item
-
-
 tokenizer_glb: RecformerTokenizer = None
+
+
+def load_config_tokenizer(args, item2id):
+    config = RecformerConfig.from_pretrained(args.model_name_or_path)
+    config.max_attr_num = 3
+    config.max_attr_length = 32
+    config.max_item_embeddings = 51
+    config.attention_window = [64] * 12
+    config.max_token_num = 1024
+    config.item_num = len(item2id)
+    config.finetune_negative_sample_size = args.finetune_negative_sample_size
+    config.pooler_type = "attribute"
+    config.session_reduce_method = args.session_reduce_method
+    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    return config, tokenizer
 
 
 def _par_tokenize_doc(doc):
@@ -179,28 +174,15 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step:
         wandb_logger.log({f"train_step_{step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
 
 
-def main():
-    args = parse_args()
+def main(args):
+
     print(args)
 
     seed_everything(42)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
-
-    config = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config.max_attr_num = 3
-    config.max_attr_length = 32
-    config.max_item_embeddings = 51
-    config.attention_window = [64] * 12
-    config.max_token_num = 1024
-    config.item_num = len(item2id)
-    config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    config.pooler_type = args.pooler_type
-    config.session_reduce_method = args.session_reduce_method
-    config.global_attention = args.global_attention
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
-
+    config, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
 
@@ -386,4 +368,4 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_finetune_args())
