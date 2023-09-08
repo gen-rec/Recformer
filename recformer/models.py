@@ -194,7 +194,7 @@ class RecformerEmbeddings(nn.Module):
 class RecformerPooler(nn.Module):
     def __init__(self, config: RecformerConfig):
         super().__init__()
-        assert config.pooler_type in ["bos", "token", "item", "attribute"]
+        assert config.pooler_type in ["cls", "token", "item", "attribute"]
 
         self.pooler_type = config.pooler_type
         self.pad_token_id = config.pad_token_id
@@ -269,7 +269,7 @@ class RecformerPooler(nn.Module):
             hidden_states_pooled[~mask] = torch.nan  # (bs, seq_len, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, seq_len, hidden_size)
 
-        elif self.pooler_type == "bos":
+        elif self.pooler_type == "cls":
             hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1).unsqueeze(1)  # (bs, 1, 1, hidden_size)
 
