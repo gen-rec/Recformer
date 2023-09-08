@@ -64,9 +64,22 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
             outputs = model(**inputs)
 
-            item_embeddings.append(outputs.pooler_output.detach())
+            if args.pooler_type != "token":
+                item_embeddings.append(outputs.pooler_output.detach())
+            else:
+                pooler_output = outputs.pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
+                pooler_output = pooler_output.permute(0, 2, 1, 3)  # (bs, max_seq_len, 1, hidden_size)
+                for j in range(pooler_output.shape[0]):
+                    output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
+                    item_embeddings.append(output_)
 
-    item_embeddings = torch.cat(item_embeddings, dim=0)  # (bs, attr_num, 1, hidden_size)
+    if args.pooler_type == "token":
+        item_embeddings = torch.nn.utils.rnn.pad_sequence(
+            item_embeddings, batch_first=True, padding_value=float("nan")
+        )  # (bs, max_seq_len, 1, hidden_size)
+        item_embeddings = item_embeddings.transpose(1, 2)  # (bs, 1, max_seq_len, hidden_size)
+    else:
+        item_embeddings = torch.cat(item_embeddings, dim=0)  # (bs, attr_num, 1, hidden_size)
 
     return item_embeddings
 
