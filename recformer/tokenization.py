@@ -114,10 +114,10 @@ class RecformerTokenizer(LongformerTokenizer):
         attr_type_ids = attr_type_ids[: self.config.max_token_num]
 
         attention_mask = [1] * len(input_ids)
-        if config.global_attention_type == "cls":
+        if self.config.global_attention_type == "cls":
             global_attention_mask = [0] * len(input_ids)
             global_attention_mask[0] = 1
-        elif config.global_attention_type == "attribute":
+        elif self.config.global_attention_type == "attribute":
             global_attention_mask = [1 if a != 2 else 0 for a in token_type_ids] # 0 for bos, 1 for type, 2 for value
             assert len(global_attention_mask) == len(input_ids)
         else:

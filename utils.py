@@ -57,7 +57,7 @@ def parse_finetune_args():
 
     # model
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
-    parser.add_argument("--global-attention", type=str, dafault="cls", choices=["cls", "attribute"])
+    parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
 
     # train
     parser.add_argument("--num_train_epochs", type=int, default=16)
