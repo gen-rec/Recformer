@@ -1,19 +1,22 @@
-PRETRAIN_CKPT=$1
-DEVICE=$2
-DATASET=$3
-BATCH_SIZE=${4:-"16"}
-OUTPUT_DIR=${5:-"checkpoints"}
-SESSION_REDUCE_METHOD=${6:-"maxsim"}
-GRAD_ACC=${7:-"32"}
+SERVER=$1
+PRETRAIN_CKPT=$2
+DEVICE=$3
+DATASET=$4
+BATCH_SIZE=$5
+GRAD_ACC=$6
+POOLER_TYPE=$7
+SESSION_REDUCE_METHOD=${8:-"maxsim"}
+OUTPUT_DIR=${9:-"checkpoints"}
 
-if [ $# -le 1 ]; then
-    echo "Usage: $0 PRETRAIN_CKPT DEVICE [BATCH_SIZE]"
+if [ $# -le 4 ]; then
+    echo "Usage: $0 <server> <pretrain_ckpt> <device> <dataset> <batch_size> <grad_acc> <pooler_type> <session_reduce_method> <output_dir>"
     exit 1
 fi
 
 mkdir -p "$OUTPUT_DIR"
 
 python finetune.py \
+    --server "$SERVER" \
     --pretrain_ckpt "$PRETRAIN_CKPT" \
     --data_path finetune_data/"$DATASET" \
     --num_train_epochs 128 \
@@ -26,3 +29,4 @@ python finetune.py \
     --output_dir "$OUTPUT_DIR" \
     --verbose 1 \
     --session_reduce_method "$SESSION_REDUCE_METHOD" \
+    --pooler_type "$POOLER_TYPE" \
