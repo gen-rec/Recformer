@@ -276,18 +276,20 @@ class FinetuneDataCollatorWithPadding:
         return batch
 
     def sample_train_data(self, batch_item_ids):
-
         batch_item_seq = []
         labels = []
 
         for item_ids in batch_item_ids:
-
             item_ids = item_ids["items"]
             item_seq_len = len(item_ids)
-            start = min(item_seq_len, 0)
-            target_pos = random.randint(start, item_seq_len - 1)
-            batch_item_seq.append(item_ids[:target_pos])
-            labels.append(item_ids[target_pos])
+
+            assert len(item_ids) >= 2
+
+            start_item_pos = 0
+            target_item_pos = random.randrange(start_item_pos + 1, item_seq_len, 1)
+
+            batch_item_seq.append(item_ids[:target_item_pos])
+            labels.append(item_ids[target_item_pos])
 
         return batch_item_seq, labels
 

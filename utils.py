@@ -82,14 +82,9 @@ class Ranker(nn.Module):
         self.ce = nn.CrossEntropyLoss()
 
     def forward(self, scores, labels):
-        labels = labels.squeeze()
+        labels = labels.squeeze(dim=-1)
 
-        try:
-            loss = self.ce(scores, labels).item()
-        except:
-            print(scores.size())
-            print(labels.size())
-            loss = 0.0
+        loss = self.ce(scores, labels).item()
 
         predicts = scores[torch.arange(scores.size(0)), labels].unsqueeze(-1)  # gather perdicted values
 

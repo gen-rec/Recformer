@@ -219,6 +219,7 @@ def main():
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.pooler_type = "attribute"
+    config.session_reduce_method = args.session_reduce_method
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
     global tokenizer_glb
@@ -232,24 +233,13 @@ def main():
     path_output.mkdir(exist_ok=True, parents=True)
     path_ckpt = path_output / args.ckpt
 
-    path_tokenized_items = dir_preprocess / f"tokenized_items_{path_corpus.name}_attribute"
-
-    if path_tokenized_items.exists():
-        print(f"[Preprocessor] Use cache: {path_tokenized_items}")
-    else:
-        print(f"Loading attribute data {path_corpus}")
-        doc_tuples = [
-            _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
-        ]
-        tokenized_items = {
-            item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
-            for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
-        }
-
-        torch.save(tokenized_items, path_tokenized_items)
-
-    tokenized_items = torch.load(path_tokenized_items)
-    print(f"Successfully load {len(tokenized_items)} tokenized items.")
+    doc_tuples = [
+        _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+    ]
+    tokenized_items = {
+        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
+        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+    }
 
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
@@ -272,10 +262,15 @@ def main():
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    # path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}_attribute"
-    # if path_item_embeddings.exists():
-    print(f"Encoding items.")
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}_attribute"
+    if path_item_embeddings.exists():
+        print(f"Load item embeddings from {path_item_embeddings}.")
+        item_embeddings = torch.load(path_item_embeddings)
+    else:
+        print(f"Encoding items.")
+        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+        torch.save(item_embeddings, path_item_embeddings)
+
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device

@@ -637,7 +637,6 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         candidates: Optional[torch.Tensor] = None,  # candidate item ids
         labels: Optional[torch.Tensor] = None,  # target item ids
     ):
-
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = input_ids.size(0)
@@ -666,9 +665,24 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
             logits = self.similarity_score(pooler_output)
+
+            if self.config.session_reduce_method == "maxsim":
+                # Replace NaN with -inf
+                logits[torch.isnan(logits)] = -float("inf")
+                logits = logits.max(dim=-1).values  # (bs, |I|, num_attr)
+            elif self.config.session_reduce_method == "mean":
+                logits = logits.nanmean(dim=-1)  # (bs, |I|, num_attr)
+            else:
+                raise ValueError("Unknown session reduce method.")
+
+            logits = logits.mean(dim=-1)  # (bs, |I|)
+
+            if labels.dim() == 2:
+                labels = labels.squeeze(dim=-1)
             loss = loss_fct(logits, labels)
 
         else:  ## using sampled softmax
+            raise NotImplementedError("Negative sampling disabled")
             candidates = torch.cat(
                 (
                     labels.unsqueeze(-1),
