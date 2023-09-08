@@ -13,29 +13,23 @@ from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPaddin
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
-from utils import read_json, AverageMeterSet, Ranker
-
-
-def load_data(args):
-
-    train: dict[str, list[int]] = read_json(os.path.join(args.data_path, args.train_file), True)
-    val = read_json(os.path.join(args.data_path, args.dev_file), True)
-    test = read_json(os.path.join(args.data_path, args.test_file), True)
-    item_meta_dict = json.load(open(os.path.join(args.data_path, args.meta_file)))
-
-    item2id = read_json(os.path.join(args.data_path, args.item2id_file))
-    id2item = {v: k for k, v in item2id.items()}
-
-    item_meta_dict_filted = dict()
-    for k, v in item_meta_dict.items():
-        if k in item2id:
-            item_meta_dict_filted[k] = v
-
-    return train, val, test, item_meta_dict_filted, item2id, id2item
-
+from utils import read_json, AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 tokenizer_glb: RecformerTokenizer = None
 
+def load_config_tokenizer(args, item2id):
+    config = RecformerConfig.from_pretrained(args.model_name_or_path)
+    config.max_attr_num = 3
+    config.max_attr_length = 32
+    config.max_item_embeddings = 51
+    config.attention_window = [64] * 12
+    config.max_token_num = 1024
+    config.item_num = len(item2id)
+    config.finetune_negative_sample_size = args.finetune_negative_sample_size
+    config.pooler_type = "attribute"
+    config.session_reduce_method = args.session_reduce_method
+    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    return config, tokenizer
 
 def _par_tokenize_doc(doc):
 
@@ -164,64 +158,14 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
                 optimizer.zero_grad()
 
 
-def main():
-    parser = ArgumentParser()
-    # path and file
-    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
-    parser.add_argument("--data_path", type=str, default=None, required=True)
-    parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--ckpt", type=str, default="best_model.bin")
-    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
-    parser.add_argument("--train_file", type=str, default="train.json")
-    parser.add_argument("--dev_file", type=str, default="val.json")
-    parser.add_argument("--test_file", type=str, default="test.json")
-    parser.add_argument("--item2id_file", type=str, default="smap.json")
-    parser.add_argument("--meta_file", type=str, default="meta_data.json")
+def main(args):
 
-    # data process
-    parser.add_argument(
-        "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
-    )
-    parser.add_argument("--dataloader_num_workers", type=int, default=0)
-
-    # model
-    parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
-
-    # train
-    parser.add_argument("--num_train_epochs", type=int, default=16)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)
-    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--weight_decay", type=float, default=0)
-    parser.add_argument("--warmup_steps", type=int, default=100)
-    parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--fix_word_embedding", action="store_true")
-    parser.add_argument("--verbose", type=int, default=3)
-
-    parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
-
-    args = parser.parse_args()
     print(args)
     seed_everything(42)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
-
-    config = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config.max_attr_num = 3
-    config.max_attr_length = 32
-    config.max_item_embeddings = 51
-    config.attention_window = [64] * 12
-    config.max_token_num = 1024
-    config.item_num = len(item2id)
-    config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    config.pooler_type = "attribute"
-    config.session_reduce_method = args.session_reduce_method
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
-
+    config, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
 
@@ -335,4 +279,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_finetune_args())
