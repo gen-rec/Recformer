@@ -1,6 +1,7 @@
 import json
 import os
 from argparse import ArgumentParser
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -35,11 +36,13 @@ def load_data(args):
 
     return train, val, test, item_meta_dict_filted, item2id, id2item
 
+
 def parse_finetune_args():
     parser = ArgumentParser()
+    parser.add_argument("--server", type=str, required=True)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
-    parser.add_argument("--data_path", type=str, default=None, required=True)
+    parser.add_argument("--data_path", type=Path, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--ckpt", type=str, default="best_model.bin")
     parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
@@ -48,13 +51,11 @@ def parse_finetune_args():
     parser.add_argument("--test_file", type=str, default="test.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
-
     # data process
     parser.add_argument(
         "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
-
     # model
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
     parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
@@ -72,12 +73,12 @@ def parse_finetune_args():
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
-
     parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
+    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "bos"])
+    parser.add_argument("--global_attention", type=str, default="bos", choices=["bos", "attribute"])
+    parser.add_argument("--original_embedding", action="store_true")
+    return parser.parse_args()
 
-    args = parser.parse_args()
-
-    return args
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""

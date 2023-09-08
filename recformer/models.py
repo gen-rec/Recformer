@@ -103,39 +103,77 @@ class RecformerEmbeddings(nn.Module):
             config.max_position_embeddings, config.hidden_size, padding_idx=self.padding_idx
         )
 
+        self.original_embedding = config.original_embedding
+
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
     ):
-        if position_ids is None:
+        def original_forward():
+            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
+
+            if position_ids is None:
+                if input_ids is not None:
+                    # Create the position ids from the input token ids. Any padded tokens remain padded.
+                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+                else:
+                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+
             if input_ids is not None:
-                # Create the position ids from the input token ids. Any padded tokens remain padded.
-                position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+                input_shape = input_ids.size()
             else:
-                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+                input_shape = inputs_embeds.size()[:-1]
 
-        if input_ids is not None:
-            input_shape = input_ids.size()
+            if token_type_ids is None:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
+
+            if inputs_embeds is None:
+                inputs_embeds = self.word_embeddings(input_ids)
+            position_embeddings = self.position_embeddings(position_ids)
+            token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+            embeddings = inputs_embeds + position_embeddings + token_type_embeddings
+            embeddings = self.LayerNorm(embeddings)
+            embeddings = self.dropout(embeddings)
+            return embeddings
+
+        def recformer_forward():
+            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
+
+            if position_ids is None:
+                if input_ids is not None:
+                    # Create the position ids from the input token ids. Any padded tokens remain padded.
+                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
+                else:
+                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
+
+            if input_ids is not None:
+                input_shape = input_ids.size()
+            else:
+                input_shape = inputs_embeds.size()[:-1]
+
+            seq_length = input_shape[1]
+
+            if position_ids is None:
+                position_ids = self.position_ids[:, :seq_length]
+
+            if token_type_ids is None:
+                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+
+            if inputs_embeds is None:
+                inputs_embeds = self.word_embeddings(input_ids)
+            position_embeddings = self.position_embeddings(position_ids)
+            item_position_embeddings = self.item_position_embeddings(item_position_ids)
+            token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+            embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
+            embeddings = self.LayerNorm(embeddings)
+            embeddings = self.dropout(embeddings)
+            return embeddings
+
+        if self.original_embedding:
+            return original_forward()
         else:
-            input_shape = inputs_embeds.size()[:-1]
-
-        seq_length = input_shape[1]
-
-        if position_ids is None:
-            position_ids = self.position_ids[:, :seq_length]
-
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
-
-        if inputs_embeds is None:
-            inputs_embeds = self.word_embeddings(input_ids)
-        position_embeddings = self.position_embeddings(position_ids)
-        item_position_embeddings = self.item_position_embeddings(item_position_ids)
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-        embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        embeddings = self.dropout(embeddings)
-        return embeddings
+            return recformer_forward()
 
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):
         """
@@ -156,7 +194,10 @@ class RecformerEmbeddings(nn.Module):
 class RecformerPooler(nn.Module):
     def __init__(self, config: RecformerConfig):
         super().__init__()
+        assert config.pooler_type in ["bos", "token", "item", "attribute"]
+
         self.pooler_type = config.pooler_type
+        self.pad_token_id = config.pad_token_id
 
     def forward(
         self,
@@ -164,49 +205,76 @@ class RecformerPooler(nn.Module):
         hidden_states: torch.Tensor,
         attr_type_ids: torch.Tensor,
         item_position_ids: torch.Tensor,
-        return_cls_hidden_state: bool = False,
     ) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        # attention_mask: (bs, seq_len)
-        # hidden_states: (bs, seq_len, hidden_size)
-        # attr_type_ids: (bs, seq_len)
+        if self.pooler_type == "attribute":
+            # attention_mask: (bs, seq_len)
+            # hidden_states: (bs, seq_len, hidden_size)
+            # attr_type_ids: (bs, seq_len)
+            attr_max = attr_type_ids.max()
 
-        assert self.pooler_type == "attribute", "Only attribute pooler is supported."
+            num_items = item_position_ids.clone()
+            num_items[num_items == 50] = -100
+            num_items = torch.max(num_items, dim=1).values  # (bs, )
+            items_max = num_items.max()
 
-        if return_cls_hidden_state:
-            return hidden_states[:, 0, :]  # (bs, hidden_size)
+            # Create boolean masks for attribute and item
+            # attr_mask  (bs, attr_num, seq_len)
+            # item_mask  (bs, item_num, seq_len)
+            # attr_item_mask  (bs, attr_num, items_max, seq_len)
+            attr_mask = torch.eq(
+                attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
+            )  # (bs, attr_num, seq_len)
+            item_mask = torch.eq(
+                item_position_ids.unsqueeze(1),
+                torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
+            )  # (bs, item_num, seq_len)
+            attr_item_mask = torch.logical_and(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
 
-        batch_size = attr_type_ids.size(0)
-        attr_max = attr_type_ids.max()
+            # Select hidden_state for each item and each attribute
+            # Vectorized implementation
+            # attr_item_mask  (bs, attr_num, items_max, seq_len)  Boolean mask
+            # hidden_states  (bs, seq_len, hidden_size)
+            # hidden_states_pooled  (bs, attr_num, items_max, hidden_size)
+            hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
+            hidden_states_pooled[~attr_item_mask] = torch.nan
+            # (bs, attr_num, items_max, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.nanmean(dim=3)  # (bs, attr_num, items_max, hidden_size)
 
-        num_items = item_position_ids.clone()
-        num_items[num_items == 50] = -100
-        num_items = torch.max(num_items, dim=1).values  # (bs, )
-        items_max = num_items.max()
+        elif self.pooler_type == "item":
+            num_items = item_position_ids.clone()
+            num_items[num_items == 50] = -100
+            num_items = torch.max(num_items, dim=1).values  # (bs, )
+            items_max = num_items.max()
 
-        # Create boolean masks for attribute and item
-        # attr_mask  (bs, attr_num, seq_len)
-        # item_mask  (bs, item_num, seq_len)
-        # attr_item_mask  (bs, attr_num, items_max, seq_len)
-        attr_mask = torch.eq(
-            attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
-        )  # (bs, attr_num, seq_len)
-        item_mask = torch.eq(
-            item_position_ids.unsqueeze(1),
-            torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
-        )
-        attr_item_mask = torch.logical_and(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
+            # item_mask  (bs, item_num, seq_len)
+            item_mask = torch.eq(
+                item_position_ids.unsqueeze(1),
+                torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
+            )  # (bs, item_num, seq_len)
 
-        # Select hidden_state for each item and each attribute
-        # Vectorized implementation
-        # attr_item_mask  (bs, attr_num, items_max, seq_len)  Boolean mask
-        # hidden_states  (bs, seq_len, hidden_size)
-        # hidden_states_pooled  (bs, attr_num, items_max, hidden_size)
-        hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
-        hidden_states_pooled[~attr_item_mask] = torch.nan
-        # (bs, attr_num, items_max, seq_len, hidden_size)
-        hidden_states_pooled = hidden_states_pooled.nanmean(dim=3)  # (bs, attr_num, items_max, hidden_size)
+            # hidden_states  (bs, seq_len, hidden_size)
+            # hidden_states_pooled  (bs, items_max, hidden_size)
+            hidden_states_pooled = hidden_states.unsqueeze(1) * item_mask.unsqueeze(
+                -1
+            )  # (bs, item_num, seq_len, hidden_size)
+            hidden_states_pooled[~item_mask] = torch.nan  # (bs, items_max, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.nanmean(dim=2)  # (bs, items_max, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, items_max, hidden_size)
+
+        elif self.pooler_type == "token":
+            seq_len = hidden_states.shape[1]
+
+            mask = attention_mask[..., :seq_len].bool()  # (bs, seq_len)
+            hidden_states_pooled = hidden_states  # (bs, seq_len, hidden_size)
+            hidden_states_pooled[~mask] = torch.nan  # (bs, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, seq_len, hidden_size)
+
+        elif self.pooler_type == "bos":
+            hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(1).unsqueeze(1)  # (bs, 1, 1, hidden_size)
+
+        else:
+            raise ValueError(f"pooler_type {self.pooler_type} is not supported")
 
         return hidden_states_pooled
 
@@ -302,7 +370,16 @@ class RecformerModel(LongformerPreTrainedModel):
         else:
             unpadded_item_position_ids = item_position_ids
 
-        return padding_len, input_ids, attention_mask, token_type_ids, position_ids, item_position_ids, inputs_embeds, unpadded_item_position_ids
+        return (
+            padding_len,
+            input_ids,
+            attention_mask,
+            token_type_ids,
+            position_ids,
+            item_position_ids,
+            inputs_embeds,
+            unpadded_item_position_ids,
+        )
 
     def _merge_to_attention_mask(self, attention_mask: torch.Tensor, global_attention_mask: torch.Tensor):
         # longformer self attention expects attention mask to have 0 (no attn), 1 (local attn), 2 (global attn)
