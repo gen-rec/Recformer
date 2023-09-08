@@ -31,12 +31,17 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_method = args.session_reduce_method
     config.pooler_type = args.pooler_type
     config.original_embedding = args.original_embedding
+    config.global_attention_type = args.global_attention_type
+
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+
+    if args.global_attention_type not in ["cls", "attribute"]:
+        raise ValueError("Unknown global attention type.")
+
     return config, tokenizer
 
 
 def _par_tokenize_doc(doc):
-
     item_id, item_attr = doc
 
     input_ids, token_type_ids, attr_type_ids = tokenizer_glb.encode_item(item_attr)
@@ -45,7 +50,6 @@ def _par_tokenize_doc(doc):
 
 
 def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
-
     model.eval()
 
     items = sorted(list(tokenized_items.items()), key=lambda x: x[0])
@@ -85,7 +89,6 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
 
 def eval(model, dataloader, args):
-
     model.eval()
 
     ranker = Ranker(args.metric_ks)
@@ -185,7 +188,6 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step:
 
 
 def main(args):
-
     print(args)
 
     seed_everything(42)

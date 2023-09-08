@@ -58,6 +58,8 @@ def parse_finetune_args():
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     # model
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
+    parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
+
     # train
     parser.add_argument("--num_train_epochs", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
@@ -72,8 +74,7 @@ def parse_finetune_args():
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
     parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
-    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "bos"])
-    parser.add_argument("--global_attention", type=str, default="bos", choices=["bos", "attribute"])
+    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
     parser.add_argument("--original_embedding", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
     return parser.parse_args()
