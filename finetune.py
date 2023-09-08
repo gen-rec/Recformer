@@ -135,7 +135,7 @@ def eval(model, dataloader, args):
     return average_metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step: int):
+def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, train_step: int):
     global wandb_logger
 
     epoch_losses = []
@@ -153,7 +153,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step:
             loss = model(**batch)
 
         if wandb_logger is not None:
-            wandb_logger.log({f"train_step_{step}/loss": loss.item()})
+            wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
             epoch_losses.append(loss.item())
 
         if args.gradient_accumulation_steps > 1:
@@ -184,7 +184,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step:
                 optimizer.zero_grad()
 
     if wandb_logger is not None:
-        wandb_logger.log({f"train_step_{step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
+        wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
 
 
 def main(args):
