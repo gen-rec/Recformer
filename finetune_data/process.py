@@ -47,10 +47,11 @@ def extract_meta_data(path):
             brand = line["brand"]
             title = line["title"]
 
-            attr_dict["title"] = title
-            attr_dict["brand"] = brand
-            attr_dict["category"] = category
-            meta_data[asin] = attr_dict
+            if len(title) != 0:
+                attr_dict["title"] = title
+                attr_dict["brand"] = brand
+                attr_dict["category"] = category
+                meta_data[asin] = attr_dict
 
     return meta_data
 
@@ -90,10 +91,8 @@ for line in tqdm(gin):
         raw_sequences[user_id].append((item_id, time))
 
 for k, v in raw_sequences.items():
-    if len(v) > 3:
-        rand = random.randint(0, 4)
-        if rand == 0:
-            sequences[user_field.get_id(k)] = [(s_field.get_id(ele[0]), ele[1]) for ele in v]
+    if len(v) >= 2:
+        sequences[user_field.get_id(k)] = [(s_field.get_id(ele[0]), ele[1]) for ele in v]
 
 train_dict = dict()
 dev_dict = dict()
@@ -107,7 +106,7 @@ for k, v in tqdm(sequences.items()):
 
     length = len(sequences[k])
     intersections += length
-    if length < 3:
+    if length < 4:
         train_dict[k] = sequences[k]
     else:
         train_dict[k] = sequences[k][: length - 2]
@@ -117,25 +116,25 @@ for k, v in tqdm(sequences.items()):
 print(f"Users: {len(user_field.label2id)}, Items: {len(s_field.label2id)}, Intersects: {intersections}")
 
 f_u = open(umap_file, "w", encoding="utf8")
-json.dump(user_field.label2id, f_u)
+json.dump(user_field.label2id, f_u, indent=1, ensure_ascii=False)
 f_u.close()
 
 f_s = open(smap_file, "w", encoding="utf8")
-json.dump(s_field.label2id, f_s)
+json.dump(s_field.label2id, f_s, indent=1, ensure_ascii=False)
 f_s.close()
 
 train_f = open(train_file, "w", encoding="utf8")
-json.dump(train_dict, train_f)
+json.dump(train_dict, train_f, indent=1, ensure_ascii=False)
 train_f.close()
 
 dev_f = open(dev_file, "w", encoding="utf8")
-json.dump(dev_dict, dev_f)
+json.dump(dev_dict, dev_f, indent=1, ensure_ascii=False)
 dev_f.close()
 
 test_f = open(test_file, "w", encoding="utf8")
-json.dump(test_dict, test_f)
+json.dump(test_dict, test_f, indent=1, ensure_ascii=False)
 test_f.close()
 
 meta_f = open(meta_file, "w", encoding="utf8")
-json.dump(meta_dict, meta_f)
+json.dump(meta_dict, meta_f, indent=1, ensure_ascii=False)
 meta_f.close()
