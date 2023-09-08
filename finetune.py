@@ -1,6 +1,3 @@
-import json
-import os
-from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
 
@@ -16,7 +13,7 @@ from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPaddin
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
-from utils import read_json, AverageMeterSet, Ranker, load_data, parse_finetune_args
+from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
@@ -31,8 +28,8 @@ def load_config_tokenizer(args, item2id):
     config.max_token_num = 1024
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    config.pooler_type = "attribute"
     config.session_reduce_method = args.session_reduce_method
+    config.pooler_type = args.pooler_type
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
     return config, tokenizer
 
@@ -325,46 +322,6 @@ def main(args):
 
     if wandb_logger is not None:
         wandb_logger.log({f"test/{k}": v for k, v in test_metrics.items()})
-
-
-def parse_args():
-    parser = ArgumentParser()
-    # path and file
-    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
-    parser.add_argument("--data_path", type=Path, default=None, required=True)
-    parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--ckpt", type=str, default="best_model.bin")
-    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
-    parser.add_argument("--train_file", type=str, default="train.json")
-    parser.add_argument("--dev_file", type=str, default="val.json")
-    parser.add_argument("--test_file", type=str, default="test.json")
-    parser.add_argument("--item2id_file", type=str, default="smap.json")
-    parser.add_argument("--meta_file", type=str, default="meta_data.json")
-    # data process
-    parser.add_argument(
-        "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
-    )
-    parser.add_argument("--dataloader_num_workers", type=int, default=0)
-    # model
-    parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
-    # train
-    parser.add_argument("--num_train_epochs", type=int, default=16)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)
-    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--weight_decay", type=float, default=0)
-    parser.add_argument("--warmup_steps", type=int, default=100)
-    parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--fix_word_embedding", action="store_true")
-    parser.add_argument("--verbose", type=int, default=3)
-    parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
-    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token"])
-    parser.add_argument("--global_attention", type=str, default="cls", choices=["cls", "attribute"])
-    args = parser.parse_args()
-    return args
 
 
 if __name__ == "__main__":

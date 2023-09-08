@@ -156,7 +156,10 @@ class RecformerEmbeddings(nn.Module):
 class RecformerPooler(nn.Module):
     def __init__(self, config: RecformerConfig):
         super().__init__()
+        assert config.pooler_type in ["bos", "token", "item", "attribute"]
+
         self.pooler_type = config.pooler_type
+        self.pad_token_id = config.pad_token_id
 
     def forward(
         self,
@@ -164,49 +167,74 @@ class RecformerPooler(nn.Module):
         hidden_states: torch.Tensor,
         attr_type_ids: torch.Tensor,
         item_position_ids: torch.Tensor,
-        return_cls_hidden_state: bool = False,
     ) -> torch.Tensor:
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token.
-        # attention_mask: (bs, seq_len)
-        # hidden_states: (bs, seq_len, hidden_size)
-        # attr_type_ids: (bs, seq_len)
+        if self.pooler_type == "attribute":
+            # attention_mask: (bs, seq_len)
+            # hidden_states: (bs, seq_len, hidden_size)
+            # attr_type_ids: (bs, seq_len)
+            attr_max = attr_type_ids.max()
 
-        assert self.pooler_type == "attribute", "Only attribute pooler is supported."
+            num_items = item_position_ids.clone()
+            num_items[num_items == 50] = -100
+            num_items = torch.max(num_items, dim=1).values  # (bs, )
+            items_max = num_items.max()
 
-        if return_cls_hidden_state:
-            return hidden_states[:, 0, :]  # (bs, hidden_size)
+            # Create boolean masks for attribute and item
+            # attr_mask  (bs, attr_num, seq_len)
+            # item_mask  (bs, item_num, seq_len)
+            # attr_item_mask  (bs, attr_num, items_max, seq_len)
+            attr_mask = torch.eq(
+                attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
+            )  # (bs, attr_num, seq_len)
+            item_mask = torch.eq(
+                item_position_ids.unsqueeze(1),
+                torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
+            )  # (bs, item_num, seq_len)
+            attr_item_mask = torch.logical_and(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
 
-        batch_size = attr_type_ids.size(0)
-        attr_max = attr_type_ids.max()
+            # Select hidden_state for each item and each attribute
+            # Vectorized implementation
+            # attr_item_mask  (bs, attr_num, items_max, seq_len)  Boolean mask
+            # hidden_states  (bs, seq_len, hidden_size)
+            # hidden_states_pooled  (bs, attr_num, items_max, hidden_size)
+            hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
+            hidden_states_pooled[~attr_item_mask] = torch.nan
+            # (bs, attr_num, items_max, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.nanmean(dim=3)  # (bs, attr_num, items_max, hidden_size)
 
-        num_items = item_position_ids.clone()
-        num_items[num_items == 50] = -100
-        num_items = torch.max(num_items, dim=1).values  # (bs, )
-        items_max = num_items.max()
+        elif self.pooler_type == "item":
+            num_items = item_position_ids.clone()
+            num_items[num_items == 50] = -100
+            num_items = torch.max(num_items, dim=1).values  # (bs, )
+            items_max = num_items.max()
 
-        # Create boolean masks for attribute and item
-        # attr_mask  (bs, attr_num, seq_len)
-        # item_mask  (bs, item_num, seq_len)
-        # attr_item_mask  (bs, attr_num, items_max, seq_len)
-        attr_mask = torch.eq(
-            attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
-        )  # (bs, attr_num, seq_len)
-        item_mask = torch.eq(
-            item_position_ids.unsqueeze(1),
-            torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
-        )
-        attr_item_mask = torch.logical_and(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
+            # item_mask  (bs, item_num, seq_len)
+            item_mask = torch.eq(
+                item_position_ids.unsqueeze(1),
+                torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
+            )  # (bs, item_num, seq_len)
 
-        # Select hidden_state for each item and each attribute
-        # Vectorized implementation
-        # attr_item_mask  (bs, attr_num, items_max, seq_len)  Boolean mask
-        # hidden_states  (bs, seq_len, hidden_size)
-        # hidden_states_pooled  (bs, attr_num, items_max, hidden_size)
-        hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
-        hidden_states_pooled[~attr_item_mask] = torch.nan
-        # (bs, attr_num, items_max, seq_len, hidden_size)
-        hidden_states_pooled = hidden_states_pooled.nanmean(dim=3)  # (bs, attr_num, items_max, hidden_size)
+            # hidden_states  (bs, seq_len, hidden_size)
+            # hidden_states_pooled  (bs, items_max, hidden_size)
+            hidden_states_pooled = hidden_states.unsqueeze(1) * item_mask.unsqueeze(-1)  # (bs, item_num, seq_len, hidden_size)
+            hidden_states_pooled[~item_mask] = torch.nan  # (bs, items_max, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.nanmean(dim=2)  # (bs, items_max, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, items_max, hidden_size)
+
+        elif self.pooler_type == "token":
+            seq_len = hidden_states.shape[1]
+
+            mask = attention_mask[..., :seq_len].bool()  # (bs, seq_len)
+            hidden_states_pooled = hidden_states  # (bs, seq_len, hidden_size)
+            hidden_states_pooled[~mask] = torch.nan  # (bs, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, seq_len, hidden_size)
+
+        elif self.pooler_type == "bos":
+            hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(1).unsqueeze(1)  # (bs, 1, 1, hidden_size)
+
+        else:
+            raise ValueError(f"pooler_type {self.pooler_type} is not supported")
 
         return hidden_states_pooled
 
