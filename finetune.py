@@ -197,7 +197,7 @@ def main(args):
 
     random_word_generator = RandomWord()
     random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
-    random_word_and_date = random_word + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    server_random_word_and_date = args.server + "_" + random_word + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
     path_corpus = Path(args.data_path)
     path_output = Path(args.output_dir) / random_word
@@ -211,7 +211,7 @@ def main(args):
     wandb_logger = wandb.init(
         project="RecIR",
         entity="gen-rec",
-        name=random_word_and_date,
+        name=server_random_word_and_date,
         group=path_corpus.name,
         config=vars(args),
         tags=[
