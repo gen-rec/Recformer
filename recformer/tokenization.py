@@ -79,7 +79,7 @@ class RecformerTokenizer(LongformerTokenizer):
 
         return input_ids, token_type_ids, attr_type
 
-    def encode(self, items, encode_item=True,):
+    def encode(self, items, encode_item=True, ):
         """
         Encode a sequence of items.
         the order of items:  [past...present]
@@ -118,7 +118,7 @@ class RecformerTokenizer(LongformerTokenizer):
             global_attention_mask = [0] * len(input_ids)
             global_attention_mask[0] = 1
         elif self.config.global_attention_type == "attribute":
-            global_attention_mask = [1 if a != 2 else 0 for a in token_type_ids] # 0 for bos, 1 for type, 2 for value
+            global_attention_mask = [1 if a != 2 else 0 for a in token_type_ids]  # 0 for bos, 1 for type, 2 for value
             assert len(global_attention_mask) == len(input_ids)
         else:
             raise ValueError("Unknown global attention type.")
@@ -147,7 +147,6 @@ class RecformerTokenizer(LongformerTokenizer):
         batch_attr_type_ids = []
 
         for items in item_batch:
-
             input_ids = items["input_ids"]
             item_position_ids = items["item_position_ids"]
             token_type_ids = items["token_type_ids"]
@@ -188,7 +187,6 @@ class RecformerTokenizer(LongformerTokenizer):
 
 
 if __name__ == "__main__":
-
     from models import RecformerConfig
 
     config = RecformerConfig.from_pretrained("allenai/longformer-base-4096")
