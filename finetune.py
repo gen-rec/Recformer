@@ -29,6 +29,8 @@ def load_config_tokenizer(args, item2id):
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.pooler_type = "attribute"
     config.session_reduce_method = args.session_reduce_method
+    config.pooler_type = args.pooler_type
+    config.original_embedding = args.original_embedding
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
