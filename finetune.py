@@ -1,19 +1,24 @@
 import json
 import os
 from argparse import ArgumentParser
+from datetime import datetime
 from pathlib import Path
 
 import torch
+import wandb
 from pytorch_lightning import seed_everything
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from wonderwords import RandomWord
 
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
 from utils import read_json, AverageMeterSet, Ranker
+
+wandb_logger: wandb.sdk.wandb_run.Run | None = None
 
 
 def load_data(args):
@@ -122,7 +127,10 @@ def eval(model, dataloader, args):
     return average_metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
+def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step: int):
+    global wandb_logger
+
+    epoch_losses = []
 
     model.train()
 
@@ -135,6 +143,10 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
                 loss = model(**batch)
         else:
             loss = model(**batch)
+
+        if wandb_logger is not None:
+            wandb_logger.log({f"train_step_{step}/loss": loss.item()})
+            epoch_losses.append(loss.item())
 
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
@@ -163,48 +175,14 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
                 optimizer.step()
                 optimizer.zero_grad()
 
+    if wandb_logger is not None:
+        wandb_logger.log({f"train_step_{step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
+
 
 def main():
-    parser = ArgumentParser()
-    # path and file
-    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
-    parser.add_argument("--data_path", type=str, default=None, required=True)
-    parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--ckpt", type=str, default="best_model.bin")
-    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
-    parser.add_argument("--train_file", type=str, default="train.json")
-    parser.add_argument("--dev_file", type=str, default="val.json")
-    parser.add_argument("--test_file", type=str, default="test.json")
-    parser.add_argument("--item2id_file", type=str, default="smap.json")
-    parser.add_argument("--meta_file", type=str, default="meta_data.json")
-
-    # data process
-    parser.add_argument(
-        "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
-    )
-    parser.add_argument("--dataloader_num_workers", type=int, default=0)
-
-    # model
-    parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
-
-    # train
-    parser.add_argument("--num_train_epochs", type=int, default=16)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)
-    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--weight_decay", type=float, default=0)
-    parser.add_argument("--warmup_steps", type=int, default=100)
-    parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--fix_word_embedding", action="store_true")
-    parser.add_argument("--verbose", type=int, default=3)
-
-    parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
-
-    args = parser.parse_args()
+    args = parse_args()
     print(args)
+
     seed_everything(42)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
@@ -218,19 +196,41 @@ def main():
     config.max_token_num = 1024
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    config.pooler_type = "attribute"
+    config.pooler_type = args.pooler_type
     config.session_reduce_method = args.session_reduce_method
+    config.global_attention = args.global_attention
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
     global tokenizer_glb
     tokenizer_glb = tokenizer
 
-    path_corpus = Path(args.data_path)
-    dir_preprocess = path_corpus / "preprocess"
-    dir_preprocess.mkdir(exist_ok=True)
+    random_word_generator = RandomWord()
+    random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
+    random_word_and_date = random_word + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    path_output = Path(args.output_dir) / path_corpus.name
-    path_output.mkdir(exist_ok=True, parents=True)
+    path_corpus = Path(args.data_path)
+    path_output = Path(args.output_dir) / random_word
+
+    try:
+        path_output.mkdir(exist_ok=False, parents=True)
+    except FileExistsError:
+        raise FileExistsError(f"Output directory ({path_output}) already exists.")
+
+    global wandb_logger
+    wandb_logger = wandb.init(
+        project="RecIR",
+        entity="gen-rec",
+        name=random_word_and_date,
+        group=path_corpus.name,
+        config=vars(args),
+        tags=[
+            path_corpus.name,
+            f"pool_{args.pooler_type}",
+            f"reduce_session_{args.session_reduce_method}",
+            f"global_attn_{args.global_attention}",
+        ],
+    )
+
     path_ckpt = path_output / args.ckpt
 
     doc_tuples = [
@@ -277,7 +277,9 @@ def main():
         scaler = None
 
     test_metrics = eval(model, test_loader, args)
-    print(f"Test set: {test_metrics}")
+    if wandb_logger is not None:
+        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+    print(f"Test set Zero-shot: {test_metrics}")
 
     best_target = float("-inf")
     patient = 5
@@ -287,11 +289,14 @@ def main():
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
+        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = eval(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+
+            if wandb_logger is not None:
+                wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
 
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
@@ -311,11 +316,14 @@ def main():
 
     for epoch in range(args.num_train_epochs):
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
+        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 2)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = eval(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+
+            if wandb_logger is not None:
+                wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
@@ -332,6 +340,49 @@ def main():
     model.load_state_dict(torch.load(path_ckpt))
     test_metrics = eval(model, test_loader, args)
     print(f"Test set: {test_metrics}")
+
+    if wandb_logger is not None:
+        wandb_logger.log({f"test/{k}": v for k, v in test_metrics.items()})
+
+
+def parse_args():
+    parser = ArgumentParser()
+    # path and file
+    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
+    parser.add_argument("--data_path", type=Path, default=None, required=True)
+    parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--ckpt", type=str, default="best_model.bin")
+    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
+    parser.add_argument("--train_file", type=str, default="train.json")
+    parser.add_argument("--dev_file", type=str, default="val.json")
+    parser.add_argument("--test_file", type=str, default="test.json")
+    parser.add_argument("--item2id_file", type=str, default="smap.json")
+    parser.add_argument("--meta_file", type=str, default="meta_data.json")
+    # data process
+    parser.add_argument(
+        "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
+    )
+    parser.add_argument("--dataloader_num_workers", type=int, default=0)
+    # model
+    parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
+    # train
+    parser.add_argument("--num_train_epochs", type=int, default=16)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)
+    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--weight_decay", type=float, default=0)
+    parser.add_argument("--warmup_steps", type=int, default=100)
+    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--fix_word_embedding", action="store_true")
+    parser.add_argument("--verbose", type=int, default=3)
+    parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
+    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token"])
+    parser.add_argument("--global_attention", type=str, default="cls", choices=["cls", "attribute"])
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == "__main__":
