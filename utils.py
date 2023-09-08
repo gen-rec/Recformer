@@ -75,6 +75,7 @@ def parse_finetune_args():
     parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "bos"])
     parser.add_argument("--global_attention", type=str, default="bos", choices=["bos", "attribute"])
     parser.add_argument("--original_embedding", action="store_true")
+    parser.add_argument("--one_step_training", action="store_true")
     return parser.parse_args()
 
 

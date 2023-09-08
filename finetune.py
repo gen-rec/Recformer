@@ -301,32 +301,33 @@ def main(args):
                 if patient == 0:
                     break
 
-    print("Load best model in stage 1.")
-    model.load_state_dict(torch.load(path_ckpt))
+    if not args.one_step_training:
+        print("Load best model in stage 1.")
+        model.load_state_dict(torch.load(path_ckpt))
 
-    patient = 3
+        patient = 3
 
-    for epoch in range(args.num_train_epochs):
+        for epoch in range(args.num_train_epochs):
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 2)
+            train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 2)
 
-        if (epoch + 1) % args.verbose == 0:
-            dev_metrics = eval(model, dev_loader, args)
-            print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+            if (epoch + 1) % args.verbose == 0:
+                dev_metrics = eval(model, dev_loader, args)
+                print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
-            if wandb_logger is not None:
-                wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
+                if wandb_logger is not None:
+                    wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
-            if dev_metrics["NDCG@10"] > best_target:
-                print("Save the best model.")
-                best_target = dev_metrics["NDCG@10"]
-                patient = 3
-                torch.save(model.state_dict(), path_ckpt)
+                if dev_metrics["NDCG@10"] > best_target:
+                    print("Save the best model.")
+                    best_target = dev_metrics["NDCG@10"]
+                    patient = 3
+                    torch.save(model.state_dict(), path_ckpt)
 
-            else:
-                patient -= 1
-                if patient == 0:
-                    break
+                else:
+                    patient -= 1
+                    if patient == 0:
+                        break
 
     print("Test with the best checkpoint.")
     model.load_state_dict(torch.load(path_ckpt))
