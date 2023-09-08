@@ -8,7 +8,7 @@ POOLER_TYPE=$7
 SESSION_REDUCE_METHOD=${8:-"maxsim"}
 OUTPUT_DIR=${9:-"checkpoints"}
 
-if [ $# -le 4 ]; then
+if [ "$#" -lt 6 ]; then
     echo "Usage: $0 <server> <pretrain_ckpt> <device> <dataset> <batch_size> <grad_acc> <pooler_type> <session_reduce_method> <output_dir>"
     exit 1
 fi

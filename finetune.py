@@ -200,7 +200,7 @@ def main(args):
 
     random_word_generator = RandomWord()
     random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
-    server_random_word_and_date = args.server + "_" + random_word + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    server_random_word_and_date = args.server + "_" + random_word + "_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     path_corpus = Path(args.data_path)
     path_output = Path(args.output_dir) / random_word
@@ -221,7 +221,7 @@ def main(args):
             path_corpus.name,
             f"pool_{args.pooler_type}",
             f"reduce_session_{args.session_reduce_method}",
-            f"global_attn_{args.global_attention}",
+            f"global_attn_{args.global_attention_type}",
         ],
     )
 
