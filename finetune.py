@@ -262,14 +262,7 @@ def main():
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}_attribute"
-    if path_item_embeddings.exists():
-        print(f"Load item embeddings from {path_item_embeddings}.")
-        item_embeddings = torch.load(path_item_embeddings)
-    else:
-        print(f"Encoding items.")
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-        torch.save(item_embeddings, path_item_embeddings)
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
 
     model.init_item_embedding(item_embeddings)
 
