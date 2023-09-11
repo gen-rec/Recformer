@@ -12,7 +12,7 @@ from wonderwords import RandomWord
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
+from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig, reduce_session
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
@@ -32,6 +32,7 @@ def load_config_tokenizer(args, item2id):
     config.pooler_type = args.pooler_type
     config.original_embedding = args.original_embedding
     config.global_attention_type = args.global_attention_type
+    config.session_reduce_topk = args.session_reduce_topk
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -102,19 +103,7 @@ def eval(model, dataloader, args):
 
         with torch.no_grad():
             scores = model(**batch)  # (bs, |I|, num_attr, items_max)
-
-        # Reduce session length
-        if args.session_reduce_method == "maxsim":
-            # Replace NaN with -inf
-            scores[torch.isnan(scores)] = -float("inf")
-            scores = scores.max(dim=-1).values  # (bs, |I|, num_attr)
-        elif args.session_reduce_method == "mean":
-            scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
-        else:
-            raise ValueError("Unknown session reduce method.")
-
-        # Reduce attribute
-        scores = scores.mean(dim=-1)  # (bs, |I|)
+            scores = reduce_session(scores, args.session_reduce_method, args.session_reduce_topk)
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
 

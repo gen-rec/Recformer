@@ -741,22 +741,12 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         loss_fct = CrossEntropyLoss()
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
-            logits = self.similarity_score(pooler_output)
-
-            if self.config.session_reduce_method == "maxsim":
-                # Replace NaN with -inf
-                logits[torch.isnan(logits)] = -float("inf")
-                logits = logits.max(dim=-1).values  # (bs, |I|, num_attr)
-            elif self.config.session_reduce_method == "mean":
-                logits = logits.nanmean(dim=-1)  # (bs, |I|, num_attr)
-            else:
-                raise ValueError("Unknown session reduce method.")
-
-            logits = logits.mean(dim=-1)  # (bs, |I|)
+            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
-            loss = loss_fct(logits, labels)
+            loss = loss_fct(scores, labels)
 
         else:  ## using sampled softmax
             raise NotImplementedError("Negative sampling disabled")
@@ -769,8 +759,35 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 ),
                 dim=-1,
             )
-            logits = self.similarity_score(pooler_output, candidates)
+            scores = self.similarity_score(pooler_output, candidates)
             target = torch.zeros_like(labels, device=labels.device)
-            loss = loss_fct(logits, target)
+            loss = loss_fct(scores, target)
 
         return loss
+
+
+def reduce_session(scores: torch.Tensor, session_reduce_method: str, session_reduce_topk: int | None = None):
+    scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
+
+    if session_reduce_method == "maxsim":
+        # Replace NaN with -inf
+        scores[torch.isnan(scores)] = -torch.inf  # (bs, |I|, attr_num, items_max)
+        scores = scores.max(dim=-1).values  # (bs, |I|, num_attr)
+    elif session_reduce_method == "mean":
+        scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
+    elif session_reduce_method == "weightedsim":
+        scores[torch.isnan(scores)] = -torch.inf
+        weights = torch.softmax(scores, dim=-1)  # (bs, |I|, num_attr, items_max)
+        scores = torch.mul(scores, weights)  # (bs, |I|, num_attr, items_max)
+        scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
+    elif session_reduce_method == "topksim":
+        scores[torch.isnan(scores)] = -torch.inf
+        scores = scores.topk(session_reduce_topk, dim=-1).values  # (bs, |I|, num_attr, topk)
+        # Mask out any -inf left
+        scores[scores == -torch.inf] = torch.nan
+        scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
+    else:
+        raise ValueError("Unknown session reduce method.")
+
+    scores = scores.mean(dim=-1)  # (bs, |I|)
+    return scores

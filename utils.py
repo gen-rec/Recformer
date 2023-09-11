@@ -73,10 +73,13 @@ def parse_finetune_args():
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
-    parser.add_argument("--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean"])
+    parser.add_argument(
+        "--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean", "weightedsim", "topksim"]
+    )
     parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
     parser.add_argument("--original_embedding", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
+    parser.add_argument("--session_reduce_topk", type=int, default=5, help="topksim: topk")
     return parser.parse_args()
 
 
