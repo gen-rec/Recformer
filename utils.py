@@ -80,6 +80,7 @@ def parse_finetune_args():
     parser.add_argument("--original_embedding", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
     parser.add_argument("--session_reduce_topk", type=int, default=5, help="topksim: topk")
+    parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=1.0, help="weightedsim: temp")
     return parser.parse_args()
 
 

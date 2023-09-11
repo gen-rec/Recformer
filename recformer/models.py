@@ -766,7 +766,12 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         return loss
 
 
-def reduce_session(scores: torch.Tensor, session_reduce_method: str, session_reduce_topk: int | None = None):
+def reduce_session(
+    scores: torch.Tensor,
+    session_reduce_method: str,
+    session_reduce_topk: int | None = None,
+    session_reduce_weightedsim_temp: float = 1.0,
+):
     scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
 
     if session_reduce_method == "maxsim":
@@ -777,6 +782,7 @@ def reduce_session(scores: torch.Tensor, session_reduce_method: str, session_red
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     elif session_reduce_method == "weightedsim":
         scores[torch.isnan(scores)] = -torch.inf
+        scores = scores / session_reduce_weightedsim_temp  # (bs, |I|, num_attr, items_max)
         weights = torch.softmax(scores, dim=-1)  # (bs, |I|, num_attr, items_max)
         scores = torch.mul(scores, weights)  # (bs, |I|, num_attr, items_max)
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
