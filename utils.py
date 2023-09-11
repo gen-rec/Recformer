@@ -79,8 +79,8 @@ def parse_finetune_args():
     parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
     parser.add_argument("--original_embedding", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
-    parser.add_argument("--session_reduce_topk", type=int, default=5, help="topksim: topk")
-    parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=1.0, help="weightedsim: temp")
+    parser.add_argument("--session_reduce_topk", type=int, default=None, help="topksim: topk")
+    parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=None, help="weightedsim: temp")
     return parser.parse_args()
 
 

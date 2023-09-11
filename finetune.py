@@ -33,11 +33,17 @@ def load_config_tokenizer(args, item2id):
     config.original_embedding = args.original_embedding
     config.global_attention_type = args.global_attention_type
     config.session_reduce_topk = args.session_reduce_topk
+    config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
+
+    if args.session_reduce_method == "weightedsim" and args.session_reduce_weightedsim_temp is None:
+        raise ValueError("session_reduce_weightedsim_temp must be specified when session_reduce_method is weightedsim.")
+    if args.session_reduce_method == "topksim" and args.session_reduce_topk is None:
+        raise ValueError("session_reduce_topk must be specified when session_reduce_method is topksim.")
 
     return config, tokenizer
 
