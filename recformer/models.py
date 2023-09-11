@@ -787,6 +787,7 @@ def reduce_session(
         scores = torch.mul(scores, weights)  # (bs, |I|, num_attr, items_max)
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     elif session_reduce_method == "topksim":
+        session_reduce_topk = min(session_reduce_topk, scores.shape[-1])
         scores[torch.isnan(scores)] = -torch.inf
         scores = scores.topk(session_reduce_topk, dim=-1).values  # (bs, |I|, num_attr, topk)
         # Mask out any -inf left
