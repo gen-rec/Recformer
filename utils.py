@@ -70,7 +70,7 @@ def parse_finetune_args():
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
     parser.add_argument(

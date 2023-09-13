@@ -130,7 +130,7 @@ def eval(model, dataloader, args):
     return average_metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, train_step: int):
+def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: int):
     global wandb_logger
 
     epoch_losses = []
@@ -141,10 +141,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, train
         for k, v in batch.items():
             batch[k] = v.to(args.device)
 
-        if args.fp16:
-            with autocast():
-                loss = model(**batch)
-        else:
+        with autocast(dtype=torch.bfloat16, enabled=args.bf16):
             loss = model(**batch)
 
         if wandb_logger is not None:
@@ -154,29 +151,12 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, train
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
 
-        if args.fp16:
-            scaler.scale(loss).backward()
-        else:
-            loss.backward()
+        loss.backward()
 
-        if (step + 1) % args.gradient_accumulation_steps == 0:
-            if args.fp16:
-
-                scale_before = scaler.get_scale()
-                scaler.step(optimizer)
-                scaler.update()
-                scale_after = scaler.get_scale()
-                optimizer_was_run = scale_before <= scale_after
-                optimizer.zero_grad()
-
-                if optimizer_was_run:
-                    scheduler.step()
-
-            else:
-
-                scheduler.step()  # Update learning rate schedule
-                optimizer.step()
-                optimizer.zero_grad()
+        if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(dataloader) - 1:
+            optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()  # Update learning rate schedule
 
     if wandb_logger is not None:
         wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
@@ -260,11 +240,6 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    if args.fp16:
-        scaler = torch.cuda.amp.GradScaler()
-    else:
-        scaler = None
-
     test_metrics = eval(model, test_loader, args)
     if wandb_logger is not None:
         wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
@@ -278,7 +253,7 @@ def main(args):
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 1)
+        train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = eval(model, dev_loader, args)
@@ -306,7 +281,7 @@ def main(args):
 
         for epoch in range(args.num_train_epochs):
 
-            train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 2)
+            train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
                 dev_metrics = eval(model, dev_loader, args)
