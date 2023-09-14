@@ -281,6 +281,11 @@ def main(args):
                 if patient == 0:
                     break
 
+    test_metrics = eval(model, test_loader, args)
+    print(f"Stage-1 Test set: {test_metrics}")
+    if wandb_logger is not None:
+        wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
+
     if not args.one_step_training:
         print("Load best model in stage 1.")
         model.load_state_dict(torch.load(path_ckpt))
@@ -312,7 +317,17 @@ def main(args):
     print("Test with the best checkpoint.")
     model.load_state_dict(torch.load(path_ckpt))
     test_metrics = eval(model, test_loader, args)
-    print(f"Test set: {test_metrics}")
+    print(f"Stage-2 Test set: {test_metrics}")
+
+    if wandb_logger is not None:
+        wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
+
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings)
+
+    print("Test with the best checkpoint and the latest item embeddings.")
+    test_metrics = eval(model, test_loader, args)
+    print(f"Stage-2 Test set: {test_metrics}")
 
     if wandb_logger is not None:
         wandb_logger.log({f"test/{k}": v for k, v in test_metrics.items()})
