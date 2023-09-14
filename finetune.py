@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -66,12 +67,12 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
     with torch.no_grad():
         for i in tqdm(
-            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-            ncols=100,
-            desc="Encode all items",
+                range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+                ncols=100,
+                desc="Encode all items",
         ):
 
-            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+            item_batch = [[item] for item in items[i: i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
@@ -99,8 +100,10 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     return item_embeddings
 
 
-def eval(model, dataloader, args):
+def eval(model, dataloader, args, path_output):
     model.eval()
+
+    evaluation_results = []
 
     ranker = Ranker(args.metric_ks)
     average_meter_set = AverageMeterSet()
@@ -129,7 +132,17 @@ def eval(model, dataloader, args):
         for k, v in metrics.items():
             average_meter_set.update(k, v)
 
+        sorted_scores, predictions = torch.sort(scores, dim=-1, descending=True)
+        for b in range(scores.shape[0]):
+            evaluation_results.append({
+                "labels": labels[b].tolist(),
+                "scores": sorted_scores[b].tolist(),
+                "predictions": predictions[b].tolist(),
+            })
+
     average_metrics = average_meter_set.averages()
+    json.dump(evaluation_results, open(Path(path_output) / "evaluation_results.json", "w"), indent=1,
+              ensure_ascii=False)
 
     return average_metrics
 
@@ -311,7 +324,7 @@ def main(args):
 
     print("Test with the best checkpoint.")
     model.load_state_dict(torch.load(path_ckpt))
-    test_metrics = eval(model, test_loader, args)
+    test_metrics = eval(model, test_loader, args, path_output)
     print(f"Test set: {test_metrics}")
 
     if wandb_logger is not None:
