@@ -228,7 +228,7 @@ class RecformerPooler(nn.Module):
                 item_position_ids.unsqueeze(1),
                 torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
             )  # (bs, item_num, seq_len)
-            attr_item_mask = torch.logical_and(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
+            attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
 
             # Select hidden_state for each item and each attribute
             # Vectorized implementation
