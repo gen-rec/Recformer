@@ -65,9 +65,13 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     item_embeddings = []
 
     with torch.no_grad():
-        for i in tqdm(range(0, len(items), args.batch_size), ncols=100, desc="Encode all items"):
+        for i in tqdm(
+            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+            ncols=100,
+            desc="Encode all items",
+        ):
 
-            item_batch = [[item] for item in items[i : i + args.batch_size]]
+            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
@@ -218,8 +222,12 @@ def main(args):
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
-    dev_loader = DataLoader(val_data, batch_size=args.batch_size, collate_fn=val_data.collate_fn)
-    test_loader = DataLoader(test_data, batch_size=args.batch_size, collate_fn=test_data.collate_fn)
+    dev_loader = DataLoader(
+        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn
+    )
+    test_loader = DataLoader(
+        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
+    )
 
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(args.pretrain_ckpt)
