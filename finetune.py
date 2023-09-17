@@ -17,7 +17,6 @@ from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, Re
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
-tokenizer_glb: RecformerTokenizer = None
 
 
 def load_config_tokenizer(args, item2id):
@@ -33,8 +32,10 @@ def load_config_tokenizer(args, item2id):
     config.pooler_type = args.pooler_type
     config.original_embedding = args.original_embedding
     config.global_attention_type = args.global_attention_type
-    config.session_reduce_topk = args.session_reduce_topk
-    config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
+    if hasattr(args, "session_reduce_topk"):
+        config.session_reduce_topk = args.session_reduce_topk
+    if hasattr(args, "session_reduce_weightedsim_temp"):
+        config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -49,10 +50,10 @@ def load_config_tokenizer(args, item2id):
     return config, tokenizer
 
 
-def _par_tokenize_doc(doc):
+def _par_tokenize_doc(doc, tokenizer: RecformerTokenizer):
     item_id, item_attr = doc
 
-    input_ids, token_type_ids, attr_type_ids = tokenizer_glb.encode_item(item_attr)
+    input_ids, token_type_ids, attr_type_ids = tokenizer.encode_item(item_attr)
 
     return item_id, input_ids, token_type_ids, attr_type_ids
 
@@ -141,9 +142,10 @@ def evaluate(model, dataloader, args, path_output):
             })
 
     average_metrics = average_meter_set.averages()
-    json.dump(evaluation_results, open(Path(path_output) / "evaluation_results.json", "w"), indent=1,
-              ensure_ascii=False)
-    json.dump(average_metrics, open(Path(path_output) / "average_metrics.json", "w"), indent=1, ensure_ascii=False)
+    if path_output is not None:
+        json.dump(evaluation_results, open(Path(path_output) / "evaluation_results.json", "w"), indent=1,
+                  ensure_ascii=False)
+        json.dump(average_metrics, open(Path(path_output) / "average_metrics.json", "w"), indent=1, ensure_ascii=False)
 
     return average_metrics
 
@@ -188,8 +190,6 @@ def main(args):
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
     config, tokenizer = load_config_tokenizer(args, item2id)
-    global tokenizer_glb
-    tokenizer_glb = tokenizer
 
     random_word_generator = RandomWord()
     random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
@@ -221,7 +221,8 @@ def main(args):
     path_ckpt = path_output / args.ckpt
 
     doc_tuples = [
-        _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+        _par_tokenize_doc(doc, tokenizer) for doc in
+        tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
     ]
     tokenized_items = {
         item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
@@ -262,7 +263,7 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = evaluate(model, test_loader, args)
+    test_metrics = evaluate(model, test_loader, args, path_output)
     if wandb_logger is not None:
         wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
     print(f"Test set Zero-shot: {test_metrics}")
@@ -323,7 +324,6 @@ def main(args):
                     patient -= 1
                     if patient == 0:
                         break
-
 
     print("Test with the best checkpoint.")
     model.load_state_dict(torch.load(path_ckpt))
