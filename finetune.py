@@ -1,4 +1,5 @@
 import json
+import pickle
 from datetime import datetime
 from pathlib import Path
 
@@ -143,8 +144,7 @@ def evaluate(model, dataloader, args, path_output):
 
     average_metrics = average_meter_set.averages()
     if path_output is not None:
-        json.dump(evaluation_results, open(Path(path_output) / "evaluation_results.json", "w"), indent=1,
-                  ensure_ascii=False)
+        pickle.dump(evaluation_results, open(Path(path_output) / "evaluation_results.pkl", "wb"))
         json.dump(average_metrics, open(Path(path_output) / "average_metrics.json", "w"), indent=1, ensure_ascii=False)
 
     return average_metrics
