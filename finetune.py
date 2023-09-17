@@ -129,19 +129,13 @@ def evaluate(model: RecformerForSeqRec, dataloader, args):
         )
         labels = labels.to(args.device)
 
-        scores = model.forward_batch(batch_concatenated, session_len, None)  # (bs, |I|, num_attr, items_max)
-        scores = reduce_session(scores, args.session_reduce_method, args.session_reduce_topk)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=args.bf16):
+            scores = model.forward_batch(batch_concatenated, session_len, None)  # (bs, |I|, num_attr, items_max)
+            scores = reduce_session(scores, args.session_reduce_method, args.session_reduce_topk)
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
-        res = ranker(scores, labels)
-
-        metrics = {}
-        for i, k in enumerate(args.metric_ks):
-            metrics["NDCG@%d" % k] = res[2 * i]
-            metrics["Recall@%d" % k] = res[2 * i + 1]
-        metrics["MRR"] = res[-3]
-        metrics["AUC"] = res[-2]
+        metrics = ranker.forward(scores, labels)
 
         for k, v in metrics.items():
             average_meter_set.update(k, v)

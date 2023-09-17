@@ -159,12 +159,13 @@ class Ranker(nn.Module):
 
         valid_length = (scores > -MAX_VAL).sum(-1).float()
         rank = (predicts < scores).sum(-1).float()
-        res = []
+        res = {}
         for k in self.ks:
             indicator = (rank < k).float()
-            res.append(((1 / torch.log2(rank + 2)) * indicator).mean().item())  # ndcg@k
-            res.append(indicator.mean().item())  # hr@k
-        res.append((1 / (rank + 1)).mean().item())  # MRR
-        res.append((1 - (rank / valid_length)).mean().item())  # AUC
+            res[f"NDCG@{k}"] = ((1 / torch.log2(rank + 2)) * indicator).mean().item()  # ndcg@k
+            res[f"Recall@{k}"] = (indicator.mean().item())  # hr@k
+        res["MRR"] = (1 / (rank + 1)).mean().item()  # MRR
+        res["AUC"] = (1 - (rank / valid_length)).mean().item()  # AUC
+        res["loss"] = loss
 
-        return res + [loss]
+        return res
