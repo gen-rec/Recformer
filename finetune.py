@@ -143,6 +143,7 @@ def evaluate(model, dataloader, args, path_output):
     average_metrics = average_meter_set.averages()
     json.dump(evaluation_results, open(Path(path_output) / "evaluation_results.json", "w"), indent=1,
               ensure_ascii=False)
+    json.dump(average_metrics, open(Path(path_output) / "average_metrics.json", "w"), indent=1, ensure_ascii=False)
 
     return average_metrics
 
@@ -316,11 +317,13 @@ def main(args):
                     best_target = dev_metrics["NDCG@10"]
                     patient = 3
                     torch.save(model.state_dict(), path_ckpt)
+                    config.save_pretrained(path_output)
 
                 else:
                     patient -= 1
                     if patient == 0:
                         break
+
 
     print("Test with the best checkpoint.")
     model.load_state_dict(torch.load(path_ckpt))
