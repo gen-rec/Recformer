@@ -1,54 +1,51 @@
 import logging
 from dataclasses import dataclass
-from typing import List, Union, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.nn import CrossEntropyLoss
+from transformers import RobertaConfig, RobertaModel
+from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.models.longformer.modeling_longformer import (
-    LongformerConfig,
     LongformerPreTrainedModel,
-    LongformerEncoder,
-    LongformerBaseModelOutputWithPooling,
     LongformerLMHead,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class RecformerConfig(LongformerConfig):
+class RecformerConfig(RobertaConfig):
     def __init__(
         self,
-        attention_window: Union[List[int], int] = 64,
-        sep_token_id: int = 2,
-        token_type_size: int = 4,  # <s>, key, value, <pad>
-        max_token_num: int = 2048,
-        max_item_embeddings: int = 32,  # 1 for <s>, 50 for items
-        max_attr_num: int = 12,
-        max_attr_length: int = 8,
-        pooler_type: str = "cls",
-        temp: float = 0.05,
-        mlm_weight: float = 0.1,
-        item_num: int = 0,
-        finetune_negative_sample_size: int = 0,
+        *_,
+        temp: float | None = None,
+        max_attr_num: int | None = None,
+        max_attr_length: int | None = None,
+        max_item_embeddings: int | None = None,  # Maximum number of items
+        max_token_num: int | None = None,  # Maximum number of tokens
+        item_num: int | None = None,  # Number of items in the dataset
+        finetune_negative_sample_size: int | None = None,  # Number of negative samples for finetuning
+        pooler_type: str | None = None,  # Pooler type
+        session_reduce_method: str | None = None,
+        session_reduce_topk: int | None = None,
+        session_reduce_weightedsim_temp: float | None = None,
         **kwargs,
     ):
-        super().__init__(attention_window, sep_token_id, **kwargs)
+        super().__init__(**kwargs)
 
-        self.token_type_size = token_type_size
-        self.max_token_num = max_token_num
-        self.max_item_embeddings = max_item_embeddings
+        self.temp = temp
         self.max_attr_num = max_attr_num
         self.max_attr_length = max_attr_length
-        self.pooler_type = pooler_type
-        self.temp = temp
-        self.mlm_weight = mlm_weight
-
-        # finetune config
-
+        self.max_item_embeddings = max_item_embeddings
+        self.max_token_num = max_token_num
         self.item_num = item_num
         self.finetune_negative_sample_size = finetune_negative_sample_size
+        self.pooler_type = pooler_type
+        self.session_reduce_method = session_reduce_method
+        self.session_reduce_topk = session_reduce_topk
+        self.session_reduce_weightedsim_temp = session_reduce_weightedsim_temp
 
 
 @dataclass
@@ -254,8 +251,8 @@ class RecformerPooler(nn.Module):
 
             # hidden_states  (bs, seq_len, hidden_size)
             # hidden_states_pooled  (bs, items_max, hidden_size)
-            hidden_states_pooled = hidden_states.unsqueeze(1) * item_mask.unsqueeze(
-                -1
+            hidden_states_pooled = torch.mul(
+                hidden_states.unsqueeze(1), item_mask.unsqueeze(-1)
             )  # (bs, item_num, seq_len, hidden_size)
             hidden_states_pooled[~item_mask] = torch.nan  # (bs, items_max, seq_len, hidden_size)
             hidden_states_pooled = hidden_states_pooled.nanmean(dim=2)  # (bs, items_max, hidden_size)
@@ -279,225 +276,40 @@ class RecformerPooler(nn.Module):
         return hidden_states_pooled
 
 
-class RecformerModel(LongformerPreTrainedModel):
+class RecformerModelWithPooler(nn.Module):
     def __init__(self, config: RecformerConfig):
-        super().__init__(config)
+        super().__init__()
         self.config = config
 
-        if isinstance(config.attention_window, int):
-            assert config.attention_window % 2 == 0, "`config.attention_window` has to be an even value"
-            assert config.attention_window > 0, "`config.attention_window` has to be positive"
-            config.attention_window = [config.attention_window] * config.num_hidden_layers  # one value per layer
-        else:
-            assert len(config.attention_window) == config.num_hidden_layers, (
-                "`len(config.attention_window)` should equal `config.num_hidden_layers`. "
-                f"Expected {config.num_hidden_layers}, given {len(config.attention_window)}"
-            )
-
-        self.embeddings = RecformerEmbeddings(config)
-        self.encoder = LongformerEncoder(config)
+        self.model = RobertaModel(config, add_pooling_layer=False)
         self.pooler = RecformerPooler(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
-
-    def get_input_embeddings(self):
-        return self.embeddings.word_embeddings
-
-    def set_input_embeddings(self, value):
-        self.embeddings.word_embeddings = value
-
-    def _prune_heads(self, heads_to_prune):
-        """
-        Prunes heads of the model. heads_to_prune: dict of {layer_num: list of heads to prune in this layer} See base
-        class PreTrainedModel
-        """
-        for layer, heads in heads_to_prune.items():
-            self.encoder.layer[layer].attention.prune_heads(heads)
-
-    def _pad_to_window_size(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        token_type_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        item_position_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        pad_token_id: int,
-    ):
-        """A helper function to pad tokens and mask to work with implementation of Longformer self-attention."""
-        # padding
-        attention_window = (
-            self.config.attention_window
-            if isinstance(self.config.attention_window, int)
-            else max(self.config.attention_window)
-        )
-
-        assert attention_window % 2 == 0, f"`attention_window` should be an even value. Given {attention_window}"
-        input_shape = input_ids.shape if input_ids is not None else inputs_embeds.shape
-        batch_size, seq_len = input_shape[:2]
-
-        padding_len = (attention_window - seq_len % attention_window) % attention_window
-        if padding_len > 0:
-            # logger.info(
-            #     f"Input ids are automatically padded from {seq_len} to {seq_len + padding_len} to be a multiple of "
-            #     f"`config.attention_window`: {attention_window}"
-            # )
-            if input_ids is not None:
-                input_ids = nn.functional.pad(input_ids, (0, padding_len), value=pad_token_id)
-            if position_ids is not None:
-                # pad with position_id = pad_token_id as in modeling_roberta.RobertaEmbeddings
-                position_ids = nn.functional.pad(position_ids, (0, padding_len), value=pad_token_id)
-            if item_position_ids is None:
-                unpadded_item_position_ids = None
-            else:
-                unpadded_item_position_ids = item_position_ids
-                item_position_ids = nn.functional.pad(item_position_ids, (0, padding_len), value=pad_token_id)
-
-            if inputs_embeds is not None:
-                input_ids_padding = inputs_embeds.new_full(
-                    (batch_size, padding_len),
-                    self.config.pad_token_id,
-                    dtype=torch.long,
-                )
-                inputs_embeds_padding = self.embeddings(input_ids_padding)
-                inputs_embeds = torch.cat([inputs_embeds, inputs_embeds_padding], dim=-2)
-
-            attention_mask = nn.functional.pad(
-                attention_mask, (0, padding_len), value=False
-            )  # no attention on the padding tokens
-            token_type_ids = nn.functional.pad(token_type_ids, (0, padding_len), value=0)  # pad with token_type_id = 0
-        else:
-            unpadded_item_position_ids = item_position_ids
-
-        return (
-            padding_len,
-            input_ids,
-            attention_mask,
-            token_type_ids,
-            position_ids,
-            item_position_ids,
-            inputs_embeds,
-            unpadded_item_position_ids,
-        )
-
-    def _merge_to_attention_mask(self, attention_mask: torch.Tensor, global_attention_mask: torch.Tensor):
-        # longformer self attention expects attention mask to have 0 (no attn), 1 (local attn), 2 (global attn)
-        # (global_attention_mask + 1) => 1 for local attention, 2 for global attention
-        # => final attention_mask => 0 for no attention, 1 for local attention 2 for global attention
-        if attention_mask is not None:
-            attention_mask = attention_mask * (global_attention_mask + 1)
-        else:
-            # simply use `global_attention_mask` as `attention_mask`
-            # if no `attention_mask` is given
-            attention_mask = global_attention_mask + 1
-        return attention_mask
 
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        global_attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        attr_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         item_position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, LongformerBaseModelOutputWithPooling]:
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
-        elif input_ids is not None:
-            input_shape = input_ids.size()
-        elif inputs_embeds is not None:
-            input_shape = inputs_embeds.size()[:-1]
-        else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
-
-        device = input_ids.device if input_ids is not None else inputs_embeds.device
-
-        if attention_mask is None:
-            attention_mask = torch.ones(input_shape, device=device)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
-
-        # merge `global_attention_mask` and `attention_mask`
-        if global_attention_mask is not None:
-            attention_mask = self._merge_to_attention_mask(attention_mask, global_attention_mask)
-
-        (
-            padding_len,
-            input_ids,
-            attention_mask,
-            token_type_ids,
-            position_ids,
-            item_position_ids,
-            inputs_embeds,
-            unpadded_item_position_ids,
-        ) = self._pad_to_window_size(
+        attr_type_ids: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ):
+        model_output = self.model.forward(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
+        )
+        sequence_output = model_output.last_hidden_state
+
+        pooled_output = self.pooler(
+            attention_mask=attention_mask,
+            hidden_states=sequence_output,
+            attr_type_ids=attr_type_ids,
             item_position_ids=item_position_ids,
-            inputs_embeds=inputs_embeds,
-            pad_token_id=self.config.pad_token_id,
         )
 
-        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
-        # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)[
-            :, 0, 0, :
-        ]
-
-        embedding_output = self.embeddings(
-            input_ids=input_ids,
-            position_ids=position_ids,
-            item_position_ids=item_position_ids,
-            token_type_ids=token_type_ids,
-            inputs_embeds=inputs_embeds,
-        )
-
-        encoder_outputs = self.encoder(
-            embedding_output,
-            attention_mask=extended_attention_mask,
-            head_mask=head_mask,
-            padding_len=padding_len,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        sequence_output = encoder_outputs[0]
-        pooled_output = (
-            self.pooler(
-                attention_mask=attention_mask,
-                hidden_states=sequence_output,
-                attr_type_ids=attr_type_ids,
-                item_position_ids=unpadded_item_position_ids,
-            )
-            if self.pooler is not None
-            else None
-        )
-
-        if not return_dict:
-            return (sequence_output, pooled_output) + encoder_outputs[1:]
-
-        return LongformerBaseModelOutputWithPooling(
+        return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-            global_attentions=encoder_outputs.global_attentions,
+            hidden_states=model_output.hidden_states,
+            attentions=model_output.attentions,
         )
 
 
@@ -519,7 +331,7 @@ class RecformerForPretraining(LongformerPreTrainedModel):
     def __init__(self, config: RecformerConfig):
         super().__init__(config)
 
-        self.longformer = RecformerModel(config)
+        self.longformer = RecformerModelWithPooler(config)
         self.lm_head = LongformerLMHead(config)
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
@@ -671,14 +483,14 @@ class RecformerForPretraining(LongformerPreTrainedModel):
         )
 
 
-class RecformerForSeqRec(LongformerPreTrainedModel):
+class RecformerForSeqRec(nn.Module):
     def __init__(self, config: RecformerConfig):
-        super().__init__(config)
-
-        self.longformer = RecformerModel(config)
+        super().__init__()
+        self.config = config
+        self.model_with_pooler = RecformerModelWithPooler(config)
         self.sim = Similarity(config)
-        # Initialize weights and apply final processing
-        self.post_init()
+
+        self.item_embedding = None
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
@@ -697,47 +509,104 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         return sim
 
+    def forward_batch(self, batch, session_len, labels):
+        attr_type_ids = batch["attr_type_ids"]
+        token_type_ids = batch["token_type_ids"]
+        input_ids = batch["input_ids"]
+        attention_mask = batch["attention_mask"]
+
+        model_output = self.model_with_pooler.model.forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )  # (bs, seq_len, hidden_size)
+
+        hidden_states = model_output.last_hidden_state  # (bs, seq_len, hidden_size)
+
+        session_index_start = (torch.cumsum(session_len, dim=0) - session_len).tolist()
+        session_index_end = torch.cumsum(session_len, dim=0).tolist()
+
+        num_session = len(session_len)
+        max_session_len = max(session_len)
+        max_seq_len, hidden_size = hidden_states.shape[1:]
+
+        unfolded_hidden_states = torch.empty(
+            (num_session, max_session_len * max_seq_len, hidden_size),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        unfolded_token_type_ids = torch.zeros(
+            (num_session, max_session_len * max_seq_len),
+            device=token_type_ids.device,
+            dtype=token_type_ids.dtype,
+        )
+        unfolded_attr_type_ids = torch.zeros(
+            (num_session, max_session_len * max_seq_len),
+            device=attr_type_ids.device,
+            dtype=attr_type_ids.dtype,
+        )
+        unfolded_attention_mask = torch.zeros(
+            (num_session, max_session_len * max_seq_len),
+            device=attention_mask.device,
+            dtype=attention_mask.dtype,
+        )
+        item_position_ids = (
+            (torch.arange(max_session_len) + 1).unsqueeze(1).repeat(1, max_seq_len).reshape(-1).repeat(num_session, 1)
+        )
+
+        for session_idx, (start, end) in enumerate(zip(session_index_start, session_index_end)):
+            hidden_state = hidden_states[start:end]  # (session_len, seq_len, hidden_size)
+            hidden_state = hidden_state.reshape(-1, hidden_size)  # (session_len*seq_len, hidden_size)
+            unfolded_hidden_states[session_idx, : hidden_state.shape[0]] = hidden_state
+
+            token_type_id = token_type_ids[start:end]  # (session_len, seq_len)
+            token_type_id = token_type_id.reshape(-1)  # (session_len*seq_len)
+            unfolded_token_type_ids[session_idx, : token_type_id.shape[0]] = token_type_id
+
+            attr_type_id = attr_type_ids[start:end]  # (session_len, seq_len)
+            attr_type_id = attr_type_id.reshape(-1)  # (session_len*seq_len)
+            unfolded_attr_type_ids[session_idx, : attr_type_id.shape[0]] = attr_type_id
+
+            attention_mask_ = attention_mask[start:end]  # (session_len, seq_len)
+            attention_mask_ = attention_mask_.reshape(-1)  # (session_len*seq_len)
+            unfolded_attention_mask[session_idx, : attention_mask_.shape[0]] = attention_mask_
+
+        item_position_ids[unfolded_token_type_ids == 0] = 50
+
+        pooler_output = self.model_with_pooler.pooler.forward(
+            attention_mask=unfolded_attention_mask,
+            hidden_states=unfolded_hidden_states,
+            attr_type_ids=unfolded_attr_type_ids,
+            item_position_ids=item_position_ids.to(unfolded_hidden_states.device),
+        )
+
+        if labels is None:
+            return self.similarity_score(pooler_output, candidates=None)
+
+        return self._calculate_loss(pooler_output, labels=labels)
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        global_attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
         token_type_ids: Optional[torch.Tensor] = None,
         attr_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         item_position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
         candidates: Optional[torch.Tensor] = None,  # candidate item ids
         labels: Optional[torch.Tensor] = None,  # target item ids
     ):
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        batch_size = input_ids.size(0)
-
-        outputs = self.longformer(
-            input_ids,
+        outputs = self.model_with_pooler.forward(
+            input_ids=input_ids,
             attention_mask=attention_mask,
-            global_attention_mask=global_attention_mask,
-            head_mask=head_mask,
             token_type_ids=token_type_ids,
             attr_type_ids=attr_type_ids,
-            position_ids=position_ids,
             item_position_ids=item_position_ids,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
         )
 
         pooler_output = outputs.pooler_output  # (bs, hidden_size)
 
-        if labels is None:
-            return self.similarity_score(pooler_output, candidates)
+        return self._calculate_loss(pooler_output, labels)
 
+    def _calculate_loss(self, pooler_output, labels):
         loss_fct = CrossEntropyLoss()
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
@@ -750,18 +619,18 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         else:  ## using sampled softmax
             raise NotImplementedError("Negative sampling disabled")
-            candidates = torch.cat(
-                (
-                    labels.unsqueeze(-1),
-                    torch.randint(
-                        0, self.config.item_num, size=(batch_size, self.config.finetune_negative_sample_size)
-                    ).to(labels.device),
-                ),
-                dim=-1,
-            )
-            scores = self.similarity_score(pooler_output, candidates)
-            target = torch.zeros_like(labels, device=labels.device)
-            loss = loss_fct(scores, target)
+            # candidates = torch.cat(
+            #     (
+            #         labels.unsqueeze(-1),
+            #         torch.randint(
+            #             0, self.config.item_num, size=(batch_size, self.config.finetune_negative_sample_size)
+            #         ).to(labels.device),
+            #     ),
+            #     dim=-1,
+            # )
+            # scores = self.similarity_score(pooler_output, candidates)
+            # target = torch.zeros_like(labels, device=labels.device)
+            # loss = loss_fct(scores, target)
 
         return loss
 

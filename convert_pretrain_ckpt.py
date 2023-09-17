@@ -2,7 +2,7 @@ from collections import OrderedDict
 
 import torch
 
-from recformer import RecformerModel, RecformerConfig, RecformerForSeqRec
+from recformer import RecformerModelWithPooler, RecformerConfig, RecformerForSeqRec
 
 PRETRAINED_CKPT_PATH = "pretrain_ckpt/pytorch_model.bin"
 LONGFORMER_CKPT_PATH = "longformer_ckpt/longformer-base-4096.bin"
@@ -34,7 +34,7 @@ config.max_attr_num = 3
 config.max_attr_length = 32
 config.max_item_embeddings = 51
 config.attention_window = [64] * 12
-model = RecformerModel(config)
+model = RecformerModelWithPooler(config)
 model.load_state_dict(new_state_dict)
 
 print("Convert successfully.")

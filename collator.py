@@ -5,7 +5,7 @@ from typing import Optional, Union, List, Dict, Tuple
 import torch
 import unicodedata
 
-from recformer import RecformerTokenizer
+from recformer import RecformerTokenizer, RecformerConfig
 
 
 # Data collator
@@ -245,10 +245,11 @@ class FinetuneDataCollatorWithPadding:
 
     tokenizer: RecformerTokenizer
     tokenized_items: Dict
+    config: RecformerConfig
 
     def __call__(
-        self, batch_item_ids: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]
-    ) -> Dict[str, torch.Tensor]:
+        self, item_id_sequences: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]
+    ):
 
         """
         features: A batch of list of item ids
@@ -264,52 +265,78 @@ class FinetuneDataCollatorWithPadding:
         attr_type_ids: (batch_size, seq_len)
         """
 
-        batch_item_seq, labels = self.sample_train_data(batch_item_ids)
-        batch_feature = self.extract_features(batch_item_seq)
-        batch_encode_features = self.encode_features(batch_feature)
-        batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
-        batch["labels"] = labels
+        sessions, labels = self.sample_session_label(item_id_sequences)
+        sessions_metadata = self.convert_item_ids_into_metadata(
+            sessions
+        )  # (batch, item_num, [input_ids, token_type_ids, attr_type_ids])
 
-        for k, v in batch.items():
-            batch[k] = torch.LongTensor(v)
+        sessions_metadata = [
+            session_metadata[::-1][:self.config.max_item_embeddings - 1] for session_metadata in sessions_metadata
+        ]
+
+        batch = []
+
+        for session_metadata, label in zip(sessions_metadata, labels):
+            batch.append(
+                {
+                    "inputs": [self.add_bos_eos(item) for item in session_metadata],
+                    "labels": torch.tensor(label),
+                }
+            )
+
+        labels = torch.tensor(labels)
 
         return batch
 
-    def sample_train_data(self, batch_item_ids):
+    def add_bos_eos(self, tokenized_item):
+        input_ids = tokenized_item.input_ids
+        token_type_ids = tokenized_item.token_type_ids
+        attr_type_ids = tokenized_item.attr_type_ids
+
+        input_ids = [self.tokenizer.bos_token_id] + input_ids + [self.tokenizer.eos_token_id]
+        token_type_ids = [0] + token_type_ids + [0]
+        attr_type_ids = [0] + attr_type_ids + [0]
+
+        input_ids = torch.tensor(input_ids)
+        token_type_ids = torch.tensor(token_type_ids)
+        attr_type_ids = torch.tensor(attr_type_ids)
+
+        return {
+            "input_ids": input_ids,
+            "token_type_ids": token_type_ids,
+            "attr_type_ids": attr_type_ids,
+        }
+
+    def sample_session_label(self, batch_data):
         batch_item_seq = []
         labels = []
 
-        for item_ids in batch_item_ids:
-            item_ids = item_ids["items"]
-            item_seq_len = len(item_ids)
-
-            assert len(item_ids) >= 2
+        for session in batch_data:
+            assert len(session) >= 2
+            session_len = len(session)
 
             start_item_pos = 0
-            target_item_pos = random.randrange(start_item_pos + 1, item_seq_len, 1)
+            target_item_pos = random.randrange(start_item_pos + 1, session_len, 1)
 
-            batch_item_seq.append(item_ids[:target_item_pos])
-            labels.append(item_ids[target_item_pos])
+            batch_item_seq.append(session[:target_item_pos])
+            labels.append(session[target_item_pos])
 
         return batch_item_seq, labels
 
-    def extract_features(self, batch_item_seq):
-
+    def convert_item_ids_into_metadata(self, batch_item_seq):
         features = []
 
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
+                feature_seq.append(self.tokenized_items[item])
             features.append(feature_seq)
 
         return features
 
-    def encode_features(self, batch_feature):
-
+    def join_metadata_into_single_sequence(self, tokenized_sessions):
         features = []
-        for feature in batch_feature:
+        for feature in tokenized_sessions:
             features.append(self.tokenizer.encode(feature, encode_item=False))
 
         return features
@@ -320,10 +347,11 @@ class EvalDataCollatorWithPadding:
 
     tokenizer: RecformerTokenizer
     tokenized_items: Dict
+    config: RecformerConfig
 
     def __call__(
         self, batch_data: List[Dict[str, Union[int, List[int], List[List[int]], torch.Tensor]]]
-    ) -> Dict[str, torch.Tensor]:
+    ):
 
         """
         features: A batch of list of item ids
@@ -338,42 +366,64 @@ class EvalDataCollatorWithPadding:
         global_attention_mask: (batch_size, seq_len)
         """
 
-        batch_item_seq, labels = self.prepare_eval_data(batch_data)
-        batch_feature = self.extract_features(batch_item_seq)
-        batch_encode_features = self.encode_features(batch_feature)
-        batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
+        sessions, labels = self.prepare_eval_data(batch_data)
+        sessions_metadata = self.convert_item_ids_into_metadata(sessions)
 
-        for k, v in batch.items():
-            batch[k] = torch.LongTensor(v)
+        sessions_metadata = [
+            session_metadata[::-1][:self.config.max_item_embeddings - 1] for session_metadata in sessions_metadata
+        ]
 
-        labels = torch.LongTensor(labels)
+        batch = []
+
+        for session_metadata in sessions_metadata:
+            batch.append(
+                {
+                    "inputs": [self.add_bos_eos(item) for item in session_metadata],
+                }
+            )
+
+        labels = torch.tensor(labels)
 
         return batch, labels
 
+    def add_bos_eos(self, tokenized_item):
+        input_ids = tokenized_item.input_ids
+        token_type_ids = tokenized_item.token_type_ids
+        attr_type_ids = tokenized_item.attr_type_ids
+
+        input_ids = [self.tokenizer.bos_token_id] + input_ids + [self.tokenizer.eos_token_id]
+        token_type_ids = [0] + token_type_ids + [0]
+        attr_type_ids = [0] + attr_type_ids + [0]
+
+        input_ids = torch.tensor(input_ids)
+        token_type_ids = torch.tensor(token_type_ids)
+        attr_type_ids = torch.tensor(attr_type_ids)
+
+        return {
+            "input_ids": input_ids,
+            "token_type_ids": token_type_ids,
+            "attr_type_ids": attr_type_ids,
+        }
+
     def prepare_eval_data(self, batch_data):
 
-        batch_item_seq = []
+        sessions = []
         labels = []
 
-        for data_line in batch_data:
-
-            item_ids = data_line["items"]
-            label = data_line["label"]
-
-            batch_item_seq.append(item_ids)
+        for session, label in batch_data:
+            sessions.append(session)
             labels.append(label)
 
-        return batch_item_seq, labels
+        return sessions, labels
 
-    def extract_features(self, batch_item_seq):
+    def convert_item_ids_into_metadata(self, batch_item_seq):
 
         features = []
 
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
+                feature_seq.append(self.tokenized_items[item])
             features.append(feature_seq)
 
         return features

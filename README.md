@@ -128,7 +128,7 @@ You can load the pretrained model by running the following code:
 
 ```python
 import torch
-from recformer import RecformerModel, RecformerConfig, RecformerForSeqRec
+from recformer import RecformerModelWithPooler, RecformerConfig, RecformerForSeqRec
 
 config = RecformerConfig.from_pretrained('allenai/longformer-base-4096')
 config.max_attr_num = 3  # max number of attributes for each item
@@ -136,7 +136,7 @@ config.max_attr_length = 32  # max number of tokens for each attribute
 config.max_item_embeddings = 51  # max number of items in a sequence +1 for cls token
 config.attention_window = [64] * 12  # attention window for each layer
 
-model = RecformerModel(config)
+model = RecformerModelWithPooler(config)
 model.load_state_dict(torch.load('recformer_ckpt.bin'))
 
 model = RecformerForSeqRec(config)

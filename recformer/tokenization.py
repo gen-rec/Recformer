@@ -1,7 +1,9 @@
 from collections import defaultdict
 
 import torch
-from transformers import LongformerTokenizer
+from transformers import RobertaTokenizer
+
+from recformer import RecformerConfig
 
 
 class IntFactory:
@@ -13,12 +15,15 @@ class IntFactory:
         return self.counter
 
 
-class RecformerTokenizer(LongformerTokenizer):
+class RecformerTokenizer(RobertaTokenizer):
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, config=None):
+    def from_pretrained(
+        cls, pretrained_model_name_or_path, config: RecformerConfig | None = None, *init_inputs, **kwargs
+    ):
         cls.config = config
         cls.attr_map: defaultdict[str, int] = defaultdict(IntFactory())  # Mapping attribute name to id
-        return super().from_pretrained(pretrained_model_name_or_path)
+
+        return super().from_pretrained(pretrained_model_name_or_path, *init_inputs, **kwargs)
 
     def __call__(self, items, pad_to_max=False, return_tensor=False):
         """
@@ -31,7 +36,6 @@ class RecformerTokenizer(LongformerTokenizer):
         item_position_ids: the position of items
         token_type_ids: id for key or value
         attention_mask: local attention masks
-        global_attention_mask: global attention masks for Longformer
         """
 
         if len(items) > 0 and isinstance(items[0], list):  # batched items
@@ -50,7 +54,7 @@ class RecformerTokenizer(LongformerTokenizer):
     def item_tokenize(self, text):
         return self.convert_tokens_to_ids(self.tokenize(text))
 
-    def encode_item(self, item):
+    def tokenize_item(self, item):
 
         input_ids = []
         token_type_ids = []
@@ -79,7 +83,7 @@ class RecformerTokenizer(LongformerTokenizer):
 
         return input_ids, token_type_ids, attr_type
 
-    def encode(self, items, encode_item=True, ):
+    def encode(self, items, encode_item=True):
         """
         Encode a sequence of items.
         the order of items:  [past...present]
@@ -97,7 +101,7 @@ class RecformerTokenizer(LongformerTokenizer):
 
             if encode_item:
 
-                item_input_ids, item_token_type_ids, item_attr_type_ids = self.encode_item(item)
+                item_input_ids, item_token_type_ids, item_attr_type_ids = self.tokenize_item(item)
 
             else:
                 item_input_ids, item_token_type_ids, item_attr_type_ids = item
@@ -114,21 +118,12 @@ class RecformerTokenizer(LongformerTokenizer):
         attr_type_ids = attr_type_ids[: self.config.max_token_num]
 
         attention_mask = [1] * len(input_ids)
-        if self.config.global_attention_type == "cls":
-            global_attention_mask = [0] * len(input_ids)
-            global_attention_mask[0] = 1
-        elif self.config.global_attention_type == "attribute":
-            global_attention_mask = [1 if a != 2 else 0 for a in token_type_ids]  # 0 for bos, 1 for type, 2 for value
-            assert len(global_attention_mask) == len(input_ids)
-        else:
-            raise ValueError("Unknown global attention type.")
 
         return {
             "input_ids": input_ids,
             "item_position_ids": item_position_ids,
             "token_type_ids": token_type_ids,
             "attention_mask": attention_mask,
-            "global_attention_mask": global_attention_mask,
             "attr_type_ids": attr_type_ids,
         }
 
@@ -143,7 +138,6 @@ class RecformerTokenizer(LongformerTokenizer):
         batch_item_position_ids = []
         batch_token_type_ids = []
         batch_attention_mask = []
-        batch_global_attention_mask = []
         batch_attr_type_ids = []
 
         for items in item_batch:
@@ -151,7 +145,6 @@ class RecformerTokenizer(LongformerTokenizer):
             item_position_ids = items["item_position_ids"]
             token_type_ids = items["token_type_ids"]
             attention_mask = items["attention_mask"]
-            global_attention_mask = items["global_attention_mask"]
             item_attr_type_ids = items["attr_type_ids"]
 
             length_to_pad = max_length - len(input_ids)
@@ -160,14 +153,12 @@ class RecformerTokenizer(LongformerTokenizer):
             item_position_ids += [self.config.max_item_embeddings - 1] * length_to_pad
             token_type_ids += [3] * length_to_pad
             attention_mask += [0] * length_to_pad
-            global_attention_mask += [0] * length_to_pad
             item_attr_type_ids += [0] * length_to_pad
 
             batch_input_ids.append(input_ids)
             batch_item_position_ids.append(item_position_ids)
             batch_token_type_ids.append(token_type_ids)
             batch_attention_mask.append(attention_mask)
-            batch_global_attention_mask.append(global_attention_mask)
             batch_attr_type_ids.append(item_attr_type_ids)
 
         return {
@@ -175,7 +166,6 @@ class RecformerTokenizer(LongformerTokenizer):
             "item_position_ids": batch_item_position_ids,
             "token_type_ids": batch_token_type_ids,
             "attention_mask": batch_attention_mask,
-            "global_attention_mask": batch_global_attention_mask,
             "attr_type_ids": batch_attr_type_ids,
         }
 
@@ -186,12 +176,11 @@ class RecformerTokenizer(LongformerTokenizer):
         return self.padding(item_batch, pad_to_max)
 
 
-if __name__ == "__main__":
+def test():
     from models import RecformerConfig
 
-    config = RecformerConfig.from_pretrained("allenai/longformer-base-4096")
+    config = RecformerConfig.from_pretrained("roberta-base")
     tokenizer = RecformerTokenizer.from_pretrained("allenai/longformer-base-4096", config=config)
-
     items1 = [
         {
             "pt": "PUZZLES",
@@ -243,11 +232,13 @@ if __name__ == "__main__":
             "style": "Hanging Flowers",
         },
     ]
-
     inputs = tokenizer(items1)
     print(inputs)
     print(tokenizer.convert_ids_to_tokens(inputs["input_ids"]))
     print(len(inputs["input_ids"]))
-
     inputs = tokenizer([items1, items2])
     print(inputs)
+
+
+if __name__ == "__main__":
+    test()
