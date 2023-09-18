@@ -298,7 +298,7 @@ class RecformerModelWithPooler(nn.Module):
         )
         sequence_output = model_output.last_hidden_state
 
-        pooled_output = self.pooler(
+        pooled_output = self.pooler.forward(
             attention_mask=attention_mask,
             hidden_states=sequence_output,
             attr_type_ids=attr_type_ids,
@@ -488,16 +488,15 @@ class RecformerForSeqRec(nn.Module):
         super().__init__()
         self.config = config
         self.model_with_pooler = RecformerModelWithPooler(config)
+        self.position_embedding = nn.Embedding.from_pretrained(
+            self.model_with_pooler.model.embeddings.position_embeddings.weight / 10, freeze=True
+        )
         self.sim = Similarity(config)
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=1e-8)
+        self.item_embedding = nn.Parameter(torch.empty((config.item_num, config.hidden_size)), requires_grad=False)
 
-        self.item_embedding = None
-
-    def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
-        if embeddings is None:
-            raise ValueError("embeddings must be provided.")
-
-        self.item_embedding = embeddings.clone()
-        self.item_embedding.requires_grad = False
+    def init_item_embedding(self, embeddings: torch.Tensor):
+        self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
 
     def similarity_score(self, pooler_output, candidates=None):
         if candidates is not None:
@@ -516,8 +515,7 @@ class RecformerForSeqRec(nn.Module):
         attention_mask = batch["attention_mask"]
 
         model_output = self.model_with_pooler.model.forward(
-            input_ids=input_ids,
-            attention_mask=attention_mask
+            input_ids=input_ids, attention_mask=attention_mask
         )  # (bs, seq_len, hidden_size)
 
         hidden_states = model_output.last_hidden_state  # (bs, seq_len, hidden_size)
@@ -551,7 +549,7 @@ class RecformerForSeqRec(nn.Module):
         )
         item_position_ids = (
             (torch.arange(max_session_len) + 1).unsqueeze(1).repeat(1, max_seq_len).reshape(-1).repeat(num_session, 1)
-        )
+        )  # (num_session, max_session_len*max_seq_len)
 
         for session_idx, (start, end) in enumerate(zip(session_index_start, session_index_end)):
             hidden_state = hidden_states[start:end]  # (session_len, seq_len, hidden_size)
@@ -571,6 +569,11 @@ class RecformerForSeqRec(nn.Module):
             unfolded_attention_mask[session_idx, : attention_mask_.shape[0]] = attention_mask_
 
         item_position_ids[unfolded_token_type_ids == 0] = 50
+
+        unfolded_hidden_states = torch.add(
+                unfolded_hidden_states,
+                self.position_embedding.forward(item_position_ids.to(unfolded_hidden_states.device)),
+            )
 
         pooler_output = self.model_with_pooler.pooler.forward(
             attention_mask=unfolded_attention_mask,

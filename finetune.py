@@ -261,7 +261,9 @@ def main(args):
     )
 
     model = RecformerForSeqRec(config)
-    model.model_with_pooler.model.load_state_dict(torch.load(args.pretrain_ckpt))
+    missing, unexpected = model.model_with_pooler.model.load_state_dict(torch.load(args.pretrain_ckpt), strict=False)
+    print(f"Missing keys: {missing}")
+    print(f"Unexpected keys: {unexpected}")
     model.to(args.device)
 
     if args.fix_word_embedding:
@@ -286,7 +288,6 @@ def main(args):
     patient = 5
 
     for epoch in range(args.num_train_epochs):
-
         if epoch > 0:
             item_embeddings = encode_all_items(model.model_with_pooler, tokenizer, tokenized_items, args)
             model.init_item_embedding(item_embeddings)
@@ -311,14 +312,15 @@ def main(args):
                 if patient == 0:
                     break
 
-    if not args.one_step_training:
-        print("Load best model in stage 1.")
-        model.load_state_dict(torch.load(path_ckpt))
+    print("Stage 1 Test")
+    model.load_state_dict(torch.load(path_ckpt))
+    test_metrics = evaluate(model, test_loader, args)
+    print(f"Test set stage 1: {test_metrics}")
 
+    if not args.one_step_training:
         patient = 3
 
         for epoch in range(args.num_train_epochs):
-
             train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
