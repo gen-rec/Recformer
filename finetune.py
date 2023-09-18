@@ -187,6 +187,8 @@ def main():
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
 
+    torch.set_float32_matmul_precision("medium")
+
     args = parser.parse_args()
     print(args)
     seed_everything(42)
@@ -213,7 +215,6 @@ def main():
 
     path_output = Path(args.output_dir) / path_corpus.name
     path_output.mkdir(exist_ok=True, parents=True)
-    path_ckpt = path_output / args.ckpt
 
     path_tokenized_items = dir_preprocess / f"tokenized_items_{path_corpus.name}"
 
@@ -256,15 +257,8 @@ def main():
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    path_item_embeddings = dir_preprocess / f"item_embeddings_{path_corpus.name}"
-    if path_item_embeddings.exists():
-        print(f"[Item Embeddings] Use cache: {path_tokenized_items}")
-    else:
-        print(f"Encoding items.")
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-        torch.save(item_embeddings, path_item_embeddings)
-
-    item_embeddings = torch.load(path_item_embeddings)
+    print(f"Encoding items.")
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
@@ -298,7 +292,7 @@ def main():
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
                 patient = 5
-                torch.save(model.state_dict(), path_ckpt)
+                torch.save(model.state_dict(), path_output / "stage_1_best_model.pt")
 
             else:
                 patient -= 1
@@ -306,10 +300,20 @@ def main():
                     break
 
     print("Load best model in stage 1.")
-    model.load_state_dict(torch.load(path_ckpt))
+
+    model.load_state_dict(torch.load(path_output / "stage_1_best_model.pt"))
+
+    print("Test with embedding from stage 1.")
+    test_metrics = eval(model, test_loader, args)
+    print(f"[RESULT0] Test set: {test_metrics}")
+
+    print("Test with reloading item embeddings.")
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings)
+    test_metrics = eval(model, test_loader, args)
+    print(f"[RESULT1] Test set: {test_metrics}")
 
     patient = 3
-
     for epoch in range(args.num_train_epochs):
 
         train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
@@ -322,7 +326,7 @@ def main():
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
                 patient = 3
-                torch.save(model.state_dict(), path_ckpt)
+                torch.save(model.state_dict(), path_output / "stage_2_best_model.pt")
 
             else:
                 patient -= 1
@@ -330,9 +334,16 @@ def main():
                     break
 
     print("Test with the best checkpoint.")
-    model.load_state_dict(torch.load(path_ckpt))
+    model.load_state_dict(torch.load(path_output / "stage_2_best_model.pt"))
     test_metrics = eval(model, test_loader, args)
-    print(f"Test set: {test_metrics}")
+    print(f"[RESULT2] Test set: {test_metrics}")
+
+    print("Test with reloading item embeddings.")
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings)
+
+    test_metrics = eval(model, test_loader, args)
+    print(f"[RESULT3] Test set: {test_metrics}")
 
 
 if __name__ == "__main__":
