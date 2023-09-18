@@ -44,7 +44,6 @@ def parse_finetune_args():
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--ckpt", type=str, default="best_model.bin")
     parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
     parser.add_argument("--train_file", type=str, default="train.json")
     parser.add_argument("--dev_file", type=str, default="val.json")
