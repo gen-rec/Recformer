@@ -12,40 +12,11 @@ from wonderwords import RandomWord
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig, reduce_session
-from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
+from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, reduce_session
+from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args, load_config_tokenizer
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
-
-
-def load_config_tokenizer(args, item2id):
-    config = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config.max_attr_num = 3
-    config.max_attr_length = 32
-    config.max_item_embeddings = 51
-    config.attention_window = [64] * 12
-    config.max_token_num = 1024
-    config.item_num = len(item2id)
-    config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    config.session_reduce_method = args.session_reduce_method
-    config.pooler_type = args.pooler_type
-    config.original_embedding = args.original_embedding
-    config.global_attention_type = args.global_attention_type
-    config.session_reduce_topk = args.session_reduce_topk
-    config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
-
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
-
-    if args.global_attention_type not in ["cls", "attribute"]:
-        raise ValueError("Unknown global attention type.")
-
-    if args.session_reduce_method == "weightedsim" and args.session_reduce_weightedsim_temp is None:
-        raise ValueError("session_reduce_weightedsim_temp must be specified when session_reduce_method is weightedsim.")
-    if args.session_reduce_method == "topksim" and args.session_reduce_topk is None:
-        raise ValueError("session_reduce_topk must be specified when session_reduce_method is topksim.")
-
-    return config, tokenizer
 
 
 def _par_tokenize_doc(doc):
@@ -173,7 +144,7 @@ def main(args):
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
-    config, tokenizer = load_config_tokenizer(args, item2id)
+    config, tokenizer = load_config_tokenizer(args, len(item2id))
     global tokenizer_glb
     tokenizer_glb = tokenizer
 

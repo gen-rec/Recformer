@@ -9,12 +9,11 @@ from recformer import RecformerTokenizer
 
 
 # Data collator
-@dataclass
 class PretrainDataCollatorWithPadding:
-
-    tokenizer: RecformerTokenizer
-    tokenized_items: Dict
-    mlm_probability: float
+    def __init__(self, tokenizer: RecformerTokenizer, tokenized_items: Dict, mlm_probability: float):
+        self.tokenizer = tokenizer
+        self.tokenized_items = tokenized_items
+        self.mlm_probability = mlm_probability
 
     def __call__(
         self, batch_item_ids: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]
@@ -61,8 +60,6 @@ class PretrainDataCollatorWithPadding:
         batch_item_seq_b = []
 
         for item_ids in batch_item_ids:
-
-            item_ids = item_ids["items"]
             item_seq_len = len(item_ids)
             start = (item_seq_len - 1) // 2
             target_pos = random.randint(start, item_seq_len - 1)

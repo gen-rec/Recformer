@@ -1,114 +1,63 @@
-import argparse
-import json
-import logging
-from multiprocessing import Pool
+from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import ModelCheckpoint
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.loggers import WandbLogger, CSVLogger
 
-from collator import PretrainDataCollatorWithPadding
-from lightning_dataloader import ClickDataset
-from recformer import RecformerForPretraining, RecformerTokenizer, RecformerConfig, LitWrapper
-
-logger = logging.getLogger(__name__)
+from lightning_dataloader import RecformerDataModule
+from recformer import RecformerForPretraining, LitWrapper, RecformerConfig, RecformerTokenizer
+from utils import parse_pretrain_args
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--model_name_or_path", type=str, default=None)
-parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
-parser.add_argument(
-    "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
-)
-parser.add_argument("--train_file", type=str, required=True)
-parser.add_argument("--dev_file", type=str, required=True)
-parser.add_argument("--item_attr_file", type=str, required=True)
-parser.add_argument("--output_dir", type=str, required=True)
-parser.add_argument("--num_train_epochs", type=int, default=10)
-parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-parser.add_argument("--dataloader_num_workers", type=int, default=2)
-parser.add_argument("--mlm_probability", type=float, default=0.15)
-parser.add_argument("--batch_size", type=int, default=2)
-parser.add_argument("--learning_rate", type=float, default=5e-5)
-parser.add_argument("--valid_step", type=int, default=2000)
-parser.add_argument("--log_step", type=int, default=2000)
-parser.add_argument("--device", type=int, default=1)
-parser.add_argument("--fp16", action="store_true")
-parser.add_argument("--ckpt", type=str, default=None)
-parser.add_argument("--longformer_ckpt", type=str, default="longformer_ckpt/longformer-base-4096.bin")
-parser.add_argument("--fix_word_embedding", action="store_true")
+def tokenize(tokenizer, item):
+    item_id, item_attr = item
+
+    return item_id, *tokenizer.encode_item(item_attr)
 
 
-tokenizer_glb: RecformerTokenizer = None
-
-
-def _par_tokenize_doc(doc):
-
-    item_id, item_attr = doc
-
-    input_ids, token_type_ids = tokenizer_glb.encode_item(item_attr)
-
-    return item_id, input_ids, token_type_ids
-
-
-def main():
-
-    args = parser.parse_args()
+def main(args: Namespace):
     print(args)
+    torch.set_float32_matmul_precision("medium")
     seed_everything(42)
+
+    dataset_path = Path(args.data_path)
+
+    random_word = args.random_word
+    random_word_and_date = random_word + "_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    output_path = Path(args.output_dir) / random_word
+
+    output_path.mkdir(exist_ok=True, parents=True)
 
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
     config.max_attr_num = 3
     config.max_attr_length = 32
     config.max_item_embeddings = 51  # 50 item and 1 for cls
     config.attention_window = [64] * 12
+    config.item_num = None
     config.max_token_num = 1024
+    config.finetune_negative_sample_size = None
+    config.session_reduce_method = "maxsim"
+    config.pooler_type = "attribute"
+    config.original_embedding = False
+    config.global_attention_type = "cls"
+    config.session_reduce_topk = None
+    config.session_reduce_weightedsim_temp = None
+
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
-    global tokenizer_glb
-    tokenizer_glb = tokenizer
-
-    # preprocess corpus
-    path_corpus = Path(args.item_attr_file)
-    dir_corpus = path_corpus.parent
-    dir_preprocess = dir_corpus / "preprocess"
-    dir_preprocess.mkdir(exist_ok=True)
-
-    path_tokenized_items = dir_preprocess / f"tokenized_items_{path_corpus.name}"
-
-    if path_tokenized_items.exists():
-        print(f"[Preprocessor] Use cache: {path_tokenized_items}")
-    else:
-        print(f"Loading attribute data {path_corpus}")
-        item_attrs = json.load(open(path_corpus))
-        pool = Pool(processes=args.preprocessing_num_workers)
-        pool_func = pool.imap(func=_par_tokenize_doc, iterable=item_attrs.items())
-        doc_tuples = list(tqdm(pool_func, total=len(item_attrs), ncols=100, desc=f"[Tokenize] {path_corpus}"))
-        tokenized_items = {item_id: [input_ids, token_type_ids] for item_id, input_ids, token_type_ids in doc_tuples}
-        pool.close()
-        pool.join()
-
-        json.dump(tokenized_items, open(path_tokenized_items, "w"))
-
-    tokenized_items = json.load(open(path_tokenized_items))  # dir_preprocess / f'attr_small.json'))#
-    print(f"Successfully load {len(tokenized_items)} tokenized items.")
-
-    data_collator = PretrainDataCollatorWithPadding(tokenizer, tokenized_items, mlm_probability=args.mlm_probability)
-    train_data = ClickDataset(json.load(open(args.train_file)), data_collator)
-    dev_data = ClickDataset(json.load(open(args.dev_file)), data_collator)
-
-    train_loader = DataLoader(
-        train_data,
+    datamodule = RecformerDataModule(
+        tokenizer=tokenizer,
+        mlm_probability=args.mlm_probability,
+        train_path=dataset_path / args.train_file,
+        val_path=dataset_path / args.dev_file,
+        item_metadata_path=dataset_path / args.item_attr_file,
+        tokenized_cache_save_path=output_path,
         batch_size=args.batch_size,
-        shuffle=True,
-        collate_fn=train_data.collate_fn,
         num_workers=args.dataloader_num_workers,
-    )
-    dev_loader = DataLoader(
-        dev_data, batch_size=args.batch_size, collate_fn=dev_data.collate_fn, num_workers=args.dataloader_num_workers
     )
 
     pytorch_model = RecformerForPretraining(config)
@@ -119,28 +68,55 @@ def main():
         for param in pytorch_model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    model = LitWrapper(pytorch_model, learning_rate=args.learning_rate)
+    model = LitWrapper(pytorch_model, learning_rate=args.learning_rate, warmup_steps=args.warmup_steps)
 
-    checkpoint_callback = ModelCheckpoint(
-        save_top_k=5, monitor="accuracy", mode="max", filename="{epoch}-{accuracy:.4f}"
-    )
+    callbacks = [
+        ModelCheckpoint(save_top_k=5, monitor="accuracy", mode="max", filename="{epoch}-{accuracy:.4f}"),
+        EarlyStopping(
+            monitor="val/loss",
+            patience=5,
+            verbose=True,
+            mode="min",
+        ),
+    ]
+
+    loggers = [
+        WandbLogger(
+            save_dir=output_path,
+            name=random_word_and_date,
+            entity="gen-rec",
+            project="RecIR-pretrain",
+        ),
+        CSVLogger(
+            save_dir=output_path,
+            name=random_word_and_date,
+        )
+    ]
+
+    for logger in loggers:
+        logger.log_hyperparams(args)
 
     trainer = Trainer(
-        accelerator="gpu",
-        max_epochs=args.num_train_epochs,
-        devices=args.device,
+        accelerator="auto",
+        strategy="auto",
+        max_epochs=args.max_epochs,
+        num_nodes=2,
         accumulate_grad_batches=args.gradient_accumulation_steps,
-        val_check_interval=args.valid_step,
+        val_check_interval=args.val_check_interval,
         default_root_dir=args.output_dir,
-        gradient_clip_val=1.0,
-        log_every_n_steps=args.log_step,
-        precision=16 if args.fp16 else 32,
-        strategy="deepspeed_stage_2",
-        callbacks=[checkpoint_callback],
+        log_every_n_steps=25,
+        precision="bf16-mixed" if args.bf16 else 32,
+        callbacks=callbacks,
+        logger=loggers,
     )
 
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=dev_loader, ckpt_path=args.ckpt)
+    trainer.fit(model, datamodule=datamodule)
+
+    if trainer.is_global_zero:
+        trainer.save_checkpoint(output_path / "checkpoint.ckpt")
+        config.save_pretrained(output_path)
+        torch.save(pytorch_model.state_dict(), output_path / "model_state_dict.pt")
 
 
 if __name__ == "__main__":
-    main()
+    main(parse_pretrain_args())

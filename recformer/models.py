@@ -3,9 +3,10 @@ from dataclasses import dataclass
 from typing import List, Union, Optional, Tuple
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
+from torch import distributed
 from torch.nn import CrossEntropyLoss
+from torch.nn.functional import cross_entropy
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
     LongformerPreTrainedModel,
@@ -103,7 +104,10 @@ class RecformerEmbeddings(nn.Module):
             config.max_position_embeddings, config.hidden_size, padding_idx=self.padding_idx
         )
 
-        self.original_embedding = config.original_embedding
+        try:
+            self.original_embedding = config.original_embedding
+        except AttributeError:
+            self.original_embedding = None
 
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
@@ -297,9 +301,6 @@ class RecformerModel(LongformerPreTrainedModel):
         self.embeddings = RecformerEmbeddings(config)
         self.encoder = LongformerEncoder(config)
         self.pooler = RecformerPooler(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
@@ -515,15 +516,14 @@ class Similarity(nn.Module):
         return self.cos(x, y) / self.temp
 
 
-class RecformerForPretraining(LongformerPreTrainedModel):
+class RecformerForPretraining(nn.Module):
     def __init__(self, config: RecformerConfig):
-        super().__init__(config)
+        super().__init__()
 
+        self.config = config
         self.longformer = RecformerModel(config)
         self.lm_head = LongformerLMHead(config)
         self.sim = Similarity(config)
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def forward(
         self,
@@ -546,13 +546,9 @@ class RecformerForPretraining(LongformerPreTrainedModel):
         head_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
     ):
-
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = input_ids_a.size(0)
 
@@ -624,40 +620,47 @@ class RecformerForPretraining(LongformerPreTrainedModel):
         z2 = outputs_b.pooler_output  # (bs*num_sent, hidden_size)
 
         # Gather all embeddings if using distributed training
-        if dist.is_initialized() and self.training:
-
+        if self.training and distributed.is_initialized():
             # Dummy vectors for allgather
-            z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
-            z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
+            z1_list = [torch.zeros_like(z1) for _ in range(distributed.get_world_size())]
+            z2_list = [torch.zeros_like(z2) for _ in range(distributed.get_world_size())]
+
             # Allgather
-            dist.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
-            dist.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
+            distributed.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
+            distributed.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
 
             # Since allgather results do not have gradients, we replace the
             # current process's corresponding embeddings with original tensors
-            z1_list[dist.get_rank()] = z1
-            z2_list[dist.get_rank()] = z2
+            z1_list[distributed.get_rank()] = z1
+            z2_list[distributed.get_rank()] = z2
+
             # Get full batch embeddings: (bs x N, hidden)
             z1 = torch.cat(z1_list, 0)
             z2 = torch.cat(z2_list, 0)
 
-        cos_sim = self.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-        labels = torch.arange(cos_sim.size(0)).long().to(cos_sim.device)
+        # z1: (bs, attr_num, items_max, hidden_size)
+        # z2: (bs, attr_num, 1, hidden_size)
+        scores = self.sim(z1.unsqueeze(1), z2)  # (bs, bs, attr_num, items_max)
+        cos_sim = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)  # (bs, bs)
+        labels = torch.arange(cos_sim.size(0), device=cos_sim.device)
 
-        loss_fct = CrossEntropyLoss()
-        loss = loss_fct(cos_sim, labels)
-        correct_num = (torch.argmax(cos_sim, 1) == labels).sum()
+        loss = cross_entropy(cos_sim, labels)
+        correct_num = torch.eq(torch.argmax(cos_sim, 1), labels).sum()
 
         if mlm_outputs_a is not None and mlm_labels_a is not None:
             mlm_labels_a = mlm_labels_a.view(-1, mlm_labels_a.size(-1))
             prediction_scores_a = self.lm_head(mlm_outputs_a.last_hidden_state)
-            masked_lm_loss_a = loss_fct(prediction_scores_a.view(-1, self.config.vocab_size), mlm_labels_a.view(-1))
+            masked_lm_loss_a = cross_entropy(
+                prediction_scores_a.view(-1, self.config.vocab_size), mlm_labels_a.view(-1)
+            )
             loss = loss + self.config.mlm_weight * masked_lm_loss_a
 
         if mlm_outputs_b is not None and mlm_labels_b is not None:
             mlm_labels_b = mlm_labels_b.view(-1, mlm_labels_b.size(-1))
             prediction_scores_b = self.lm_head(mlm_outputs_b.last_hidden_state)
-            masked_lm_loss_b = loss_fct(prediction_scores_b.view(-1, self.config.vocab_size), mlm_labels_b.view(-1))
+            masked_lm_loss_b = cross_entropy(
+                prediction_scores_b.view(-1, self.config.vocab_size), mlm_labels_b.view(-1)
+            )
             loss = loss + self.config.mlm_weight * masked_lm_loss_b
 
         return RecformerPretrainingOutput(

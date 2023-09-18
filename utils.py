@@ -6,6 +6,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from recformer import RecformerConfig, RecformerTokenizer
+
 MAX_VAL = 1e4
 
 
@@ -35,6 +37,38 @@ def load_data(args):
             item_meta_dict_filted[k] = v
 
     return train, val, test, item_meta_dict_filted, item2id, id2item
+
+
+def parse_pretrain_args():
+    parser = ArgumentParser()
+
+    # Paths
+    parser.add_argument("--model_name_or_path", type=str, default=None)
+    parser.add_argument("--data_path", type=Path, default=Path("pretrain_data"))
+    parser.add_argument("--train_file", type=str, default="train.json")
+    parser.add_argument("--dev_file", type=str, default="dev.json")
+    parser.add_argument("--item_attr_file", type=str, default="meta_data.json")
+    parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--random_word", type=str, required=True)
+
+    # Dataset
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--dataloader_num_workers", type=int, default=2)
+
+    # Trainer
+    parser.add_argument("--max_epochs", type=int, default=32)
+    parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
+    parser.add_argument("--mlm_probability", type=float, default=0.1)
+    parser.add_argument("--val_check_interval", type=int, default=2000, help="How often to check the validation set.")
+    parser.add_argument("--devices", type=int, default=1)
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--longformer_ckpt", type=str, default="longformer_ckpt/longformer-base-4096.bin")
+    parser.add_argument("--fix_word_embedding", action="store_true")
+    parser.add_argument("--warmup_steps", type=int, default=0)
+
+    return parser.parse_args()
 
 
 def parse_finetune_args():
@@ -168,3 +202,32 @@ class Ranker(nn.Module):
         res.append((1 - (rank / valid_length)).mean().item())  # AUC
 
         return res + [loss]
+
+
+def load_config_tokenizer(args, item_num):
+    config = RecformerConfig.from_pretrained(args.model_name_or_path)
+    config.max_attr_num = 3
+    config.max_attr_length = 32
+    config.max_item_embeddings = 51
+    config.attention_window = [64] * 12
+    config.max_token_num = 1024
+    config.item_num = item_num
+    config.finetune_negative_sample_size = args.finetune_negative_sample_size
+    config.session_reduce_method = args.session_reduce_method
+    config.pooler_type = args.pooler_type
+    config.original_embedding = args.original_embedding
+    config.global_attention_type = args.global_attention_type
+    config.session_reduce_topk = args.session_reduce_topk
+    config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
+
+    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+
+    if args.global_attention_type not in ["cls", "attribute"]:
+        raise ValueError("Unknown global attention type.")
+
+    if args.session_reduce_method == "weightedsim" and args.session_reduce_weightedsim_temp is None:
+        raise ValueError("session_reduce_weightedsim_temp must be specified when session_reduce_method is weightedsim.")
+    if args.session_reduce_method == "topksim" and args.session_reduce_topk is None:
+        raise ValueError("session_reduce_topk must be specified when session_reduce_method is topksim.")
+
+    return config, tokenizer

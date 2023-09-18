@@ -1,17 +1,21 @@
-# Use distributed data parallel
-CUDA_VISIBLE_DEVICES=1,4,6,7 python lightning_pretrain.py \
+#!/usr/bin/env bash
+
+# Print PID
+echo "PID: $$"
+
+OMP_NUM_THREADS=8 WANDB_MODE=disabled torchrun --nnodes=2 --nproc_per_node=2 --node_rank="$1" --master_addr=115.145.172.223 --master_port 35458 lightning_pretrain.py \
     --model_name_or_path allenai/longformer-base-4096 \
-    --train_file pretrain_data/train.json \
-    --dev_file pretrain_data/dev.json \
-    --item_attr_file pretrain_data/meta_data.json \
+    --train_file train.json \
+    --dev_file dev.json \
+    --item_attr_file meta_data.json \
     --output_dir result/recformer_pretraining \
-    --num_train_epochs 32 \
-    --gradient_accumulation_steps 8 \
-    --preprocessing_num_workers 8 \
-    --dataloader_num_workers 8  \
+    --random_word test \
     --batch_size 16 \
-    --learning_rate 5e-5 \
+    --dataloader_num_workers 4  \
+    --max_epochs 32 \
     --temp 0.05 \
-    --device 4 \
-    --fp16 \
+    --learning_rate 5e-5 \
+    --gradient_accumulation_steps 1 \
+    --val_check_interval 2000 \
+    --bf16 \
     --fix_word_embedding

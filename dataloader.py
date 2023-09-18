@@ -25,10 +25,6 @@ class RecformerTrainDataset(Dataset):
 
         return seq
 
-    def collate_fn(self, data):
-
-        return self.collator([{"items": line} for line in data])
-
 
 class RecformerEvalDataset(Dataset):
     def __init__(self, user2train, user2val, user2test, mode, collator: EvalDataCollatorWithPadding):
