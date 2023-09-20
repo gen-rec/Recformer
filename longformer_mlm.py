@@ -1,0 +1,117 @@
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+import pytorch_lightning as pl
+import torch
+from pytorch_lightning import seed_everything, Trainer
+from pytorch_lightning.loggers import CSVLogger
+from pytorch_lightning.loggers.wandb import WandbLogger
+from transformers import LongformerForMaskedLM
+from wonderwords import RandomWord
+
+from recformer import RecformerTokenizer
+from recmlm import RecMLMConfig, RecMLMDataModule, RecMLM
+from utils import parse_mlm_args, load_data
+
+
+def _par_tokenize_doc(item, tokenizer):
+    item_id, item_attr = item
+    input_ids, token_type_ids, attr_type_ids = tokenizer.encode_item(item_attr)
+    return item_id, input_ids, token_type_ids, attr_type_ids
+
+
+def load_config_tokenizer_model(args, item2id):
+    config = RecMLMConfig.from_pretrained(args.model_name_or_path)
+    config.max_attr_num = 3
+    config.max_attr_length = 32
+    config.max_item_embeddings = 51
+    config.attention_window = [64] * 12
+    config.max_token_num = 1024
+    config.item_num = len(item2id)
+    config.global_attention_type = args.global_attention_type
+
+    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config=config)
+    model = LongformerForMaskedLM.from_pretrained(args.model_name_or_path, config=config)
+
+    return config, tokenizer, model
+
+
+def main(args: argparse.Namespace):
+    torch.set_float32_matmul_precision("medium")
+    seed_everything(42)
+
+    train, val, test, item_meta_dict, item2id, id2item = load_data(args)
+    config, tokenizer, model = load_config_tokenizer_model(args, item2id)
+
+    random_word_generator = RandomWord()
+    random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
+    server_random_word_and_date = args.server + "_" + random_word + "_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+    path_corpus = Path(args.data_path)
+    path_output = Path(args.output_dir) / random_word
+
+    # Load datamodule
+    train, val, test, item_meta_dict, item2id, id2item = load_data(args)
+    datamodule = RecMLMDataModule(mlm_ratio=args.mlm_ratio, tokenizer=tokenizer, user2train=train, user2val=val,
+                                  id2item=id2item, item_meta_dict=item_meta_dict, batch_size=args.batch_size,
+                                  num_workers=args.dataloader_num_workers)
+
+    module = RecMLM(model=model, learning_rate=args.learning_rate)
+
+    # logger
+    loggers = [
+        CSVLogger(save_dir=args.output_dir, name="RecMLM"),
+    ]
+    if args.use_wandb:
+        wandb_logger = WandbLogger(
+            project="RecMLM",
+            entity="gen-rec",
+            name=server_random_word_and_date,
+        )
+        loggers.append(wandb_logger)
+
+    for logger in loggers:
+        logger.log_hyperparams(vars(args))
+
+    # Setup trainer
+    callbacks = [
+        pl.callbacks.ModelCheckpoint(
+            monitor="val_loss",
+            dirpath=path_output,
+            mode="min",
+            save_top_k=1,
+            filename="{epoch}-{val_loss:.2f}",
+        ),
+        # pl.callbacks.RichModelSummary(max_depth=2),
+        # pl.callbacks.RichProgressBar(),
+        pl.callbacks.EarlyStopping(
+            monitor="val_loss",
+            mode="min",
+            patience=5,
+            verbose=True,
+        ),
+    ]
+
+    trainer = Trainer(
+        accelerator=args.accelerator,
+        strategy=args.strategy,
+        devices=args.devices,
+        max_steps=args.max_steps,
+        precision=args.precision,
+        reload_dataloaders_every_n_epochs=1,
+        val_check_interval=args.val_check_interval,
+        accumulate_grad_batches=args.accumulate_grad_batches,
+        callbacks=callbacks,
+        logger=loggers,
+        gradient_clip_val=args.gradient_clip_val,
+    )
+
+    trainer.fit(module, datamodule=datamodule)
+    trainer.test(ckpt_path="best", datamodule=datamodule)
+    trainer.save_checkpoint(path_output / Path("model.ckpt"))
+
+
+if __name__ == "__main__":
+    argument = parse_mlm_args()
+    main(argument)

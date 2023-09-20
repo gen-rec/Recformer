@@ -33,6 +33,7 @@ parser.add_argument(
     "--meta_file_path", default="meta_Industrial_and_Scientific.json.gz", help="Processing file path (.gz file)."
 )
 parser.add_argument("--output_path", default="Scientific", help="Output directory")
+parser.add_argument("--desc", action="store_true", help="Whether to use description or not.")
 args = parser.parse_args()
 
 
@@ -47,10 +48,14 @@ def extract_meta_data(path):
             brand = line["brand"]
             title = line["title"]
 
+            meta_data[asin] = attr_dict
             if len(title) != 0:
                 attr_dict["title"] = title
                 attr_dict["brand"] = brand
                 attr_dict["category"] = category
+                if args.desc:
+                    description = line["description"]
+                    attr_dict["description"] = description
                 meta_data[asin] = attr_dict
 
     return meta_data
