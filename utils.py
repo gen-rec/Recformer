@@ -111,6 +111,7 @@ def parse_mlm_args():
     trainer = parser.add_argument_group("Trainer")
     trainer.add_argument("--learning_rate", type=float, default=3e-5)
     trainer.add_argument("--batch_size", type=int, default=16)
+    trainer.add_argument("--mlm_batch_multiplier", type=int, default=4)
     trainer.add_argument("--accelerator", type=str, default="cuda", help="Accelerator to use. Either 'cpu' or 'cuda'")
     trainer.add_argument(
         "--accumulate_grad_batches",

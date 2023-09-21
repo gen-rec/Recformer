@@ -63,6 +63,8 @@ class RecMLM(pl.LightningModule):
         )
         return outputs
 
+    def on_train_start(self):
+       self.evaluate_rec()
     def training_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
@@ -75,31 +77,7 @@ class RecMLM(pl.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
-        recformer = RecformerForSeqRec(self.config)
-        recformer.to(self.args.device)
-        longformer_state_dict = self.model.state_dict()
-        recformer_state_dict = recformer.state_dict()
-        for name, param in longformer_state_dict.items():
-            if name not in recformer_state_dict:
-                continue
-            else:
-                try:
-                    if not recformer_state_dict[name].size() == param.size():
-                        recformer_state_dict[name].copy_(param)
-                except:
-                    continue
-        recformer.load_state_dict(recformer_state_dict, strict=False)
-
-        item_embeddings = encode_all_items(model=recformer.longformer, tokenizer=self.tokenizer,
-                                           tokenized_items=self.tokenized_items, args=self.args)
-        recformer.init_item_embedding(item_embeddings)
-        test_metrics = evaluate(recformer, self.rec_valid_dataloader, self.args)
-
-        recformer.to(torch.device("cpu"))
-        del recformer
-
-        self.log_dict({f"val_metric/{k}": v for k, v in test_metrics.items()},
-                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
+       self.evaluate_rec()
 
     def validation_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
@@ -119,17 +97,37 @@ class RecMLM(pl.LightningModule):
         outputs = self(input_ids, attention_mask, global_attention_mask, label)
         loss = outputs.loss
         self.log("test_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-
-        recformer = RecformerForSeqRec(self.config)
-        recformer.longformer = self.model.longformer
-        item_embeddings = encode_all_items(recformer, self.tokenizer, self.tokenizer, self.tokenized_items)
-        recformer.init_item_embedding(item_embeddings)
-        test_metrics = eval(recformer, self.rec_test_dataloader, self.args)
-
-        self.log_dict({f"val_metric/{k}": v for k, v in test_metrics.items()},
-                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
-
         return loss
+
+    def on_test_end(self) -> None:
+        self.evaluate_rec()
+
+    def evaluate_rec(self):
+        recformer = RecformerForSeqRec(self.config)
+        recformer.to(self.args.device)
+        longformer_state_dict = self.model.state_dict()
+        recformer_state_dict = recformer.state_dict()
+        for name, param in longformer_state_dict.items():
+            if name not in recformer_state_dict:
+                continue
+            else:
+                try:
+                    if not recformer_state_dict[name].size() == param.size():
+                        recformer_state_dict[name].copy_(param)
+                except:
+                    continue
+        recformer.load_state_dict(recformer_state_dict, strict=False)
+
+        item_embeddings = encode_all_items(model=recformer.longformer, tokenizer=self.tokenizer,
+                                           tokenized_items=self.tokenized_items, args=self.args)
+        recformer.init_item_embedding(item_embeddings)
+        test_metrics = evaluate(recformer, self.rec_test_dataloader, self.args)
+
+        recformer.to(torch.device("cpu"))
+        del recformer
+
+        self.log_dict({f"rec_metric/{k}": v for k, v in test_metrics.items()},
+                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)

@@ -66,7 +66,7 @@ def main(args: argparse.Namespace):
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
     datamodule = RecMLMDataModule(mlm_ratio=args.mlm_ratio, tokenizer=tokenizer, user2train=train, user2val=val,
                                   id2item=id2item, item_meta_dict=item_meta_dict, batch_size=args.batch_size,
-                                  num_workers=args.dataloader_num_workers)
+                                  batch_multiplier=args.mlm_batch_multiplier, num_workers=args.dataloader_num_workers)
 
     doc_tuples = [
         _par_tokenize_doc(doc, tokenizer) for doc in
