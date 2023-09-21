@@ -7,9 +7,13 @@ import torch
 from pytorch_lightning import seed_everything, Trainer
 from pytorch_lightning.loggers import CSVLogger
 from pytorch_lightning.loggers.wandb import WandbLogger
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 from transformers import LongformerForMaskedLM
 from wonderwords import RandomWord
 
+from collator import EvalDataCollatorWithPadding
+from dataloader import RecformerEvalDataset
 from recformer import RecformerTokenizer
 from recmlm import RecMLMConfig, RecMLMDataModule, RecMLM
 from utils import parse_mlm_args, load_data
@@ -29,7 +33,11 @@ def load_config_tokenizer_model(args, item2id):
     config.attention_window = [64] * 12
     config.max_token_num = 1024
     config.item_num = len(item2id)
+
+    config.session_reduce_method = args.session_reduce_method
+    config.pooler_type = args.pooler_type
     config.global_attention_type = args.global_attention_type
+    config.original_embedding = args.original_embedding
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config=config)
     model = LongformerForMaskedLM.from_pretrained(args.model_name_or_path, config=config)
@@ -40,6 +48,7 @@ def load_config_tokenizer_model(args, item2id):
 def main(args: argparse.Namespace):
     torch.set_float32_matmul_precision("medium")
     seed_everything(42)
+    args.device = args.accelerator
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
     config, tokenizer, model = load_config_tokenizer_model(args, item2id)
@@ -57,7 +66,29 @@ def main(args: argparse.Namespace):
                                   id2item=id2item, item_meta_dict=item_meta_dict, batch_size=args.batch_size,
                                   num_workers=args.dataloader_num_workers)
 
-    module = RecMLM(model=model, learning_rate=args.learning_rate)
+    doc_tuples = [
+        _par_tokenize_doc(doc, tokenizer) for doc in
+        tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+    ]
+    tokenized_items = {
+        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
+        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+    }
+    eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
+    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
+    test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
+    rec_val_loader = DataLoader(
+        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn,
+        num_workers=args.dataloader_num_workers
+    )
+    rec_test_loader = DataLoader(
+        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn,
+        num_workers=args.dataloader_num_workers
+    )
+
+    module = RecMLM(args=args, config=config, model=model, tokenizer=tokenizer, learning_rate=args.learning_rate,
+                    tokenized_items=tokenized_items,
+                    rec_val_dataloader=rec_val_loader, rec_test_dataloader=rec_test_loader)
 
     # logger
     loggers = [
@@ -67,6 +98,7 @@ def main(args: argparse.Namespace):
         wandb_logger = WandbLogger(
             project="RecMLM",
             entity="gen-rec",
+            group=path_corpus.name,
             name=server_random_word_and_date,
         )
         loggers.append(wandb_logger)
@@ -83,8 +115,7 @@ def main(args: argparse.Namespace):
             save_top_k=1,
             filename="{epoch}-{val_loss:.2f}",
         ),
-        # pl.callbacks.RichModelSummary(max_depth=2),
-        # pl.callbacks.RichProgressBar(),
+
         pl.callbacks.EarlyStopping(
             monitor="val_loss",
             mode="min",
@@ -110,6 +141,7 @@ def main(args: argparse.Namespace):
     trainer.fit(module, datamodule=datamodule)
     trainer.test(ckpt_path="best", datamodule=datamodule)
     trainer.save_checkpoint(path_output / Path("model.ckpt"))
+    config.save_pretrained(path_output)
 
 
 if __name__ == "__main__":

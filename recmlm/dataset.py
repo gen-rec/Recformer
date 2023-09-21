@@ -26,32 +26,14 @@ class RecMLMDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
 
-        if os.path.exists("valid_dataset.pt") and os.path.exists("test_dataset.pt"):
-            print(f"Loading Train Dataset from train_dataset.pt")
-            self.valid_dataset = torch.load("valid_dataset.pt")
-            self.test_dataset = torch.load("test_dataset.pt")
+        self.train_history, self.valid_history, self.test_history = self.get_history()
 
-        else:
-            _, self.valid_dataset, self.test_dataset = self.get_dataset()
-            torch.save(self.valid_dataset, "valid_dataset.pt")
-            torch.save(self.test_dataset, "test_dataset.pt")
-
-    def get_dataset(self, train=False):
+    def get_history(self):
         train_histories = list(list(self.user2train.values())[:-1])
         valid_histories = list(list(self.user2train.values()))
         test_histories = [self.user2train[user] + self.user2val[user] for user in self.user2val.keys()]
 
-        if train:
-            train_dataset = self.tokenize_dataset(train_histories)
-            print(f"Train_histories: {len(train_dataset)}")
-        else:
-            train_dataset = None
-        valid_dataset = self.tokenize_dataset(valid_histories)
-        print(f"Valid_histories: {len(valid_dataset)}")
-        test_dataset = self.tokenize_dataset(test_histories)
-        print(f"Test_histories: {len(test_dataset)}")
-
-        return train_dataset, valid_dataset, test_dataset
+        return train_histories, valid_histories, test_histories
 
     def tokenize_dataset(self, histories):
 
@@ -64,15 +46,15 @@ class RecMLMDataModule(LightningDataModule):
             masked_input_ids = []
             for idx, (input_id, token_id) in enumerate(
                     zip(tokenized_history['input_ids'], tokenized_history['token_type_ids'])):
-                is_mask = False
                 if token_id == 0:  # bos token
+                    is_mask = False
                     masked_input_ids.append(input_id)
                 elif token_id == 1:  # item token
                     is_mask = False
                     masked_input_ids.append(input_id)
                 elif token_id == 2 and tokenized_history['token_type_ids'][idx - 1] == 1:
                     # mask with mlm_ratio
-                    is_mask = True if torch.rand(1) < self.mlm_ratio else 0
+                    is_mask = True if torch.rand(1) < self.mlm_ratio else False
                     masked_input_ids.append(self.tokenizer.mask_token_id if is_mask else input_id)
                 elif token_id == 2:
                     masked_input_ids.append(self.tokenizer.mask_token_id if is_mask else input_id)
@@ -98,8 +80,9 @@ class RecMLMDataModule(LightningDataModule):
         )
 
     def val_dataloader(self):
+        valid_dataset = self.tokenize_dataset(self.valid_history)
         return torch.utils.data.DataLoader(
-            RecMLMDataset(self.valid_dataset),
+            RecMLMDataset(valid_dataset),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -107,8 +90,9 @@ class RecMLMDataModule(LightningDataModule):
         )
 
     def test_dataloader(self):
+        test_dataset = self.tokenize_dataset(self.test_history)
         return torch.utils.data.DataLoader(
-            RecMLMDataset(self.test_dataset),
+            RecMLMDataset(test_dataset),
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,

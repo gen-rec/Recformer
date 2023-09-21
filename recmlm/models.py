@@ -1,11 +1,15 @@
+import argparse
 from typing import Union, List
 
 import pytorch_lightning as pl
 import torch
 from transformers import LongformerForMaskedLM, LongformerConfig
 
+from finetune import encode_all_items
+from recformer import RecformerConfig, RecformerForSeqRec, RecformerTokenizer
 
-class RecMLMConfig(LongformerConfig):
+
+class RecMLMConfig(RecformerConfig):
     def __init__(
             self,
             attention_window: Union[List[int], int] = 64,
@@ -29,12 +33,24 @@ class RecMLM(pl.LightningModule):
 
     def __init__(
             self,
+            args: argparse.Namespace,
+            config: RecMLMConfig,
             model: LongformerForMaskedLM,
-            learning_rate: float = 1e-5,):
+            tokenizer: RecformerTokenizer,
+            learning_rate: float,
+            tokenized_items: dict,
+            rec_val_dataloader: torch.utils.data.DataLoader,
+            rec_test_dataloader: torch.utils.data.DataLoader):
         super().__init__()
-
+        self.args = args
+        self.config = config
         self.model = model
         self.learning_rate = learning_rate
+
+        self.tokenizer = tokenizer
+        self.tokenized_items = tokenized_items
+        self.rec_valid_dataloader = rec_val_dataloader
+        self.rec_test_dataloader = rec_test_dataloader
 
     def forward(self, input_ids, attention_mask, global_attention_mask, label, *args, **kwargs):
         outputs = self.model(
@@ -58,6 +74,17 @@ class RecMLM(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
+    def on_train_epoch_end(self):
+        recformer = RecformerForSeqRec(self.config)
+        recformer.longformer = self.model.longformer
+        item_embeddings = encode_all_items(model=recformer, tokenizer=self.tokenizer,
+                                           tokenized_items=self.tokenized_items, args=self.args)
+        recformer.init_item_embedding(item_embeddings)
+        test_metrics = eval(recformer, self.rec_valid_dataloader, self.args)
+
+        self.log_dict({f"val_metric/{k}": v for k, v in test_metrics.items()},
+                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
     def validation_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
@@ -76,10 +103,19 @@ class RecMLM(pl.LightningModule):
         outputs = self(input_ids, attention_mask, global_attention_mask, label)
         loss = outputs.loss
         self.log("test_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+
+        recformer = RecformerForSeqRec(self.config)
+        recformer.longformer = self.model.longformer
+        item_embeddings = encode_all_items(recformer, self.tokenizer, self.tokenizer, self.tokenized_items)
+        recformer.init_item_embedding(item_embeddings)
+        test_metrics = eval(recformer, self.rec_test_dataloader, self.args)
+
+        self.log_dict({f"val_metric/{k}": v for k, v in test_metrics.items()},
+                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
         return loss
 
     def configure_optimizers(self):
-
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
         return {'optimizer': optimizer, 'lr_scheduler': scheduler, 'monitor': 'val_loss'}
