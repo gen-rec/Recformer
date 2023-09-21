@@ -33,6 +33,7 @@ def main(args: Namespace):
     output_path.mkdir(exist_ok=True, parents=True)
 
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
+    config.temp = args.temp
     config.max_attr_num = 3
     config.max_attr_length = 32
     config.max_item_embeddings = 51  # 50 item and 1 for cls
@@ -42,7 +43,7 @@ def main(args: Namespace):
     config.finetune_negative_sample_size = None
     config.session_reduce_method = "maxsim"
     config.pooler_type = "attribute"
-    config.original_embedding = False
+    config.original_embedding = True
     config.global_attention_type = "cls"
     config.session_reduce_topk = None
     config.session_reduce_weightedsim_temp = None
@@ -90,7 +91,7 @@ def main(args: Namespace):
         CSVLogger(
             save_dir=output_path,
             name=random_word_and_date,
-        )
+        ),
     ]
 
     for logger in loggers:
@@ -108,6 +109,8 @@ def main(args: Namespace):
         precision="bf16-mixed" if args.bf16 else 32,
         callbacks=callbacks,
         logger=loggers,
+        gradient_clip_val=1.0,
+        num_sanity_val_steps=2,
     )
 
     trainer.fit(model, datamodule=datamodule)

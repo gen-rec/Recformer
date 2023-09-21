@@ -62,7 +62,7 @@ class RecformerDataModule(LightningDataModule):
             self.item_metadata.items(),
             ncols=100,
             desc=f"[Tokenize]",
-            max_workers=16,
+            max_workers=8,
             chunksize=1000,
         )
 

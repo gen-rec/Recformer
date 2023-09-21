@@ -66,7 +66,7 @@ def parse_pretrain_args():
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--longformer_ckpt", type=str, default="longformer_ckpt/longformer-base-4096.bin")
     parser.add_argument("--fix_word_embedding", action="store_true")
-    parser.add_argument("--warmup_steps", type=int, default=0)
+    parser.add_argument("--warmup_steps", type=int, default=1000)
 
     return parser.parse_args()
 

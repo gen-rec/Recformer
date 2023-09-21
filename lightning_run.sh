@@ -3,13 +3,13 @@
 # Print PID
 echo "PID: $$"
 
-OMP_NUM_THREADS=8 WANDB_MODE=disabled torchrun --nnodes=2 --nproc_per_node=2 --node_rank="$1" --master_addr=115.145.172.223 --master_port 35458 lightning_pretrain.py \
+OMP_NUM_THREADS=8 WANDB_MODE=disabled torchrun --nnodes=2 --nproc_per_node=2 --master_addr=115.145.135.77 --master_port 35458 lightning_pretrain.py \
     --model_name_or_path allenai/longformer-base-4096 \
     --train_file train.json \
     --dev_file dev.json \
     --item_attr_file meta_data.json \
     --output_dir result/recformer_pretraining \
-    --random_word test \
+    --random_word lucky \
     --batch_size 16 \
     --dataloader_num_workers 4  \
     --max_epochs 32 \
