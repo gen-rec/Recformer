@@ -99,7 +99,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     return item_embeddings
 
 
-def eval(model, dataloader, args):
+def evaluate(model, dataloader, args):
     model.eval()
 
     ranker = Ranker(args.metric_ks)
@@ -248,7 +248,7 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = eval(model, test_loader, args)
+    test_metrics = evaluate(model, test_loader, args)
     if wandb_logger is not None:
         wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
     print(f"Test set Zero-shot: {test_metrics}")
@@ -264,7 +264,7 @@ def main(args):
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
-            dev_metrics = eval(model, dev_loader, args)
+            dev_metrics = evaluate(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
             if wandb_logger is not None:
@@ -297,7 +297,7 @@ def main(args):
             train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
-                dev_metrics = eval(model, dev_loader, args)
+                dev_metrics = evaluate(model, dev_loader, args)
                 print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
                 if wandb_logger is not None:
@@ -316,7 +316,7 @@ def main(args):
 
     print("Test with the best checkpoint.")
     model.load_state_dict(torch.load(path_ckpt))
-    test_metrics = eval(model, test_loader, args)
+    test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-2 Test set: {test_metrics}")
 
     if wandb_logger is not None:
@@ -326,7 +326,7 @@ def main(args):
     model.init_item_embedding(item_embeddings)
 
     print("Test with the best checkpoint and the latest item embeddings.")
-    test_metrics = eval(model, test_loader, args)
+    test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-2 Test set: {test_metrics}")
 
     if wandb_logger is not None:

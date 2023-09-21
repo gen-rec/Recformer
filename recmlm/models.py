@@ -5,7 +5,7 @@ import pytorch_lightning as pl
 import torch
 from transformers import LongformerForMaskedLM, LongformerConfig
 
-from finetune import encode_all_items
+from finetune import encode_all_items, evaluate
 from recformer import RecformerConfig, RecformerForSeqRec, RecformerTokenizer
 
 
@@ -76,11 +76,27 @@ class RecMLM(pl.LightningModule):
 
     def on_train_epoch_end(self):
         recformer = RecformerForSeqRec(self.config)
-        recformer.longformer = self.model.longformer
-        item_embeddings = encode_all_items(model=recformer, tokenizer=self.tokenizer,
+        recformer.to(self.args.device)
+        longformer_state_dict = self.model.state_dict()
+        recformer_state_dict = recformer.state_dict()
+        for name, param in longformer_state_dict.items():
+            if name not in recformer_state_dict:
+                continue
+            else:
+                try:
+                    if not recformer_state_dict[name].size() == param.size():
+                        recformer_state_dict[name].copy_(param)
+                except:
+                    continue
+        recformer.load_state_dict(recformer_state_dict, strict=False)
+
+        item_embeddings = encode_all_items(model=recformer.longformer, tokenizer=self.tokenizer,
                                            tokenized_items=self.tokenized_items, args=self.args)
         recformer.init_item_embedding(item_embeddings)
-        test_metrics = eval(recformer, self.rec_valid_dataloader, self.args)
+        test_metrics = evaluate(recformer, self.rec_valid_dataloader, self.args)
+
+        recformer.to(torch.device("cpu"))
+        del recformer
 
         self.log_dict({f"val_metric/{k}": v for k, v in test_metrics.items()},
                       on_step=False, on_epoch=True, prog_bar=True, logger=True)
@@ -92,7 +108,7 @@ class RecMLM(pl.LightningModule):
         label = batch["label"]
         outputs = self(input_ids, attention_mask, global_attention_mask, label)
         loss = outputs.loss
-        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def test_step(self, batch, batch_idx):

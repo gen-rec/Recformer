@@ -49,6 +49,8 @@ def main(args: argparse.Namespace):
     torch.set_float32_matmul_precision("medium")
     seed_everything(42)
     args.device = args.accelerator
+    args.session_reduce_topk = None
+    args.session_reduce_weightedsim_temp = None
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
     config, tokenizer, model = load_config_tokenizer_model(args, item2id)
