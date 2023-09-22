@@ -8,6 +8,7 @@ from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from wonderwords import RandomWord
+from transformers import LongformerForMaskedLM
 
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
@@ -190,18 +191,22 @@ def main(args):
         raise FileExistsError(f"Output directory ({path_output}) already exists.")
 
     global wandb_logger
+    wandb_tags = [
+        path_corpus.name,
+        f"pool_{args.pooler_type}",
+        f"reduce_session_{args.session_reduce_method}",
+        f"global_attn_{args.global_attention_type}",
+    ]
+    if 'mlm' in args.pretrain_ckpt:
+        wandb_tags.append('mlm')
+
     wandb_logger = wandb.init(
         project="RecIR",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=path_corpus.name,
         config=vars(args),
-        tags=[
-            path_corpus.name,
-            f"pool_{args.pooler_type}",
-            f"reduce_session_{args.session_reduce_method}",
-            f"global_attn_{args.global_attention_type}",
-        ],
+        tags=wandb_tags,
     )
 
     path_ckpt = path_output / args.ckpt
@@ -230,8 +235,17 @@ def main(args):
     )
 
     model = RecformerForSeqRec(config)
-    pretrain_ckpt = torch.load(args.pretrain_ckpt)
-    model.load_state_dict(pretrain_ckpt, strict=False)
+    if 'mlm' in args.pretrain_ckpt:
+        state_dict = torch.load(args.pretrain_ckpt)['state_dict']
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if 'model.longformer.' in k:
+                new_state_dict[k.replace('model.longformer.', '')] = v
+        del new_state_dict["embeddings.token_type_embeddings.weight"]
+        model.load_state_dict(new_state_dict, strict=False)
+    else:
+        pretrain_ckpt = torch.load(args.pretrain_ckpt)
+        model.load_state_dict(pretrain_ckpt, strict=False)
     model.to(args.device)
 
     if args.fix_word_embedding:
@@ -281,7 +295,7 @@ def main(args):
                 if patient == 0:
                     break
 
-    test_metrics = eval(model, test_loader, args)
+    test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
     if wandb_logger is not None:
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})

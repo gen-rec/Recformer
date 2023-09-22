@@ -65,7 +65,8 @@ class RecMLM(pl.LightningModule):
         return outputs
 
     def on_train_start(self):
-       self.evaluate_rec()
+        self.evaluate_rec()
+
     def training_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
@@ -78,7 +79,7 @@ class RecMLM(pl.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
-       self.evaluate_rec()
+        self.evaluate_rec()
 
     def validation_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
@@ -109,7 +110,7 @@ class RecMLM(pl.LightningModule):
 
         del state_dict["embeddings.token_type_embeddings.weight"]
 
-        pprint(recformer.longformer.load_state_dict(state_dict, strict=False))
+        recformer.longformer.load_state_dict(state_dict, strict=False)
         recformer.to(self.args.device)
 
         item_embeddings = encode_all_items(model=recformer.longformer, tokenizer=self.tokenizer,
