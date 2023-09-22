@@ -1,4 +1,5 @@
 import argparse
+from pprint import pprint
 from typing import Union, List
 
 import pytorch_lightning as pl
@@ -104,19 +105,12 @@ class RecMLM(pl.LightningModule):
 
     def evaluate_rec(self):
         recformer = RecformerForSeqRec(self.config)
+        state_dict = self.model.longformer.state_dict()
+
+        del state_dict["embeddings.token_type_embeddings.weight"]
+
+        pprint(recformer.longformer.load_state_dict(state_dict, strict=False))
         recformer.to(self.args.device)
-        longformer_state_dict = self.model.state_dict()
-        recformer_state_dict = recformer.state_dict()
-        for name, param in longformer_state_dict.items():
-            if name not in recformer_state_dict:
-                continue
-            else:
-                try:
-                    if not recformer_state_dict[name].size() == param.size():
-                        recformer_state_dict[name].copy_(param)
-                except:
-                    continue
-        recformer.load_state_dict(recformer_state_dict, strict=False)
 
         item_embeddings = encode_all_items(model=recformer.longformer, tokenizer=self.tokenizer,
                                            tokenized_items=self.tokenized_items, args=self.args)
@@ -126,8 +120,7 @@ class RecMLM(pl.LightningModule):
         recformer.to(torch.device("cpu"))
         del recformer
 
-        self.log_dict({f"rec_metric/{k}": v for k, v in test_metrics.items()},
-                      on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.trainer.logger.log_metrics({f"rec_metric/{k}": v for k, v in test_metrics.items()})
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)

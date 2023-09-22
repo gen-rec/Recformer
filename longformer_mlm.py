@@ -61,12 +61,13 @@ def main(args: argparse.Namespace):
 
     path_corpus = Path(args.data_path)
     path_output = Path(args.output_dir) / random_word
+    print(f"Output directory: {path_output}")
 
     # Load datamodule
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
     datamodule = RecMLMDataModule(mlm_ratio=args.mlm_ratio, tokenizer=tokenizer, user2train=train, user2val=val,
                                   id2item=id2item, item_meta_dict=item_meta_dict, batch_size=args.batch_size,
-                                  batch_multiplier=args.mlm_batch_multiplier, num_workers=args.dataloader_num_workers)
+                                  mlm_batch_multiplier=args.mlm_batch_multiplier, num_workers=args.dataloader_num_workers)
 
     doc_tuples = [
         _par_tokenize_doc(doc, tokenizer) for doc in
@@ -127,6 +128,7 @@ def main(args: argparse.Namespace):
     ]
 
     trainer = Trainer(
+        limit_test_batches=1,
         accelerator=args.accelerator,
         strategy=args.strategy,
         devices=args.devices,
@@ -142,6 +144,7 @@ def main(args: argparse.Namespace):
 
     trainer.fit(module, datamodule=datamodule)
     trainer.test(ckpt_path="best", datamodule=datamodule)
+
     trainer.save_checkpoint(path_output / Path("model.ckpt"))
     config.save_pretrained(path_output)
 

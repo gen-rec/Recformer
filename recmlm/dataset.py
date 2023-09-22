@@ -14,7 +14,8 @@ class RecMLMDataModule(LightningDataModule):
 
     def __init__(self, mlm_ratio: float, tokenizer: RecformerTokenizer, user2train: dict[int, list[int]],
                  user2val: dict[int, list[int]] | None, id2item: dict[int, str],
-                 item_meta_dict: dict[int, dict[str, str]], batch_size: int, batch_multiplier:int, num_workers: int = 0):
+                 item_meta_dict: dict[int, dict[str, str]], batch_size: int, mlm_batch_multiplier: int,
+                 num_workers: int = 0):
 
         super().__init__()
         self.mlm_ratio = mlm_ratio
@@ -23,12 +24,22 @@ class RecMLMDataModule(LightningDataModule):
         self.user2val = user2val
         self.id2item = id2item
         self.item_meta_dict = item_meta_dict
-        self.batch_size = batch_size * batch_multiplier
+        self.batch_size = batch_size * mlm_batch_multiplier
         self.num_workers = num_workers
 
         self.train_history, self.valid_history, self.test_history = self.get_history()
-        self.valid_dataset = self.tokenize_dataset(self.valid_history)
-        self.test_dataset = self.tokenize_dataset(self.test_history)
+
+        if os.path.exists("valid_dataset.pt"):
+            self.valid_dataset = torch.load("valid_dataset.pt")
+        else:
+            self.valid_dataset = self.tokenize_dataset(self.valid_history)
+            torch.save(self.valid_dataset, "valid_dataset.pt")
+
+        if os.path.exists("test_dataset.pt"):
+            self.test_dataset = self.tokenize_dataset(self.test_history)
+        else:
+            self.test_dataset = self.tokenize_dataset(self.test_history)
+            torch.save(self.test_dataset, "test_dataset.pt")
 
     def get_history(self):
         train_histories = list(list(self.user2train.values())[:-1])
