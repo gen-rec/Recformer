@@ -21,7 +21,7 @@ def read_json(path, as_int=False):
 
 
 def load_data(args):
-    train: dict[str, list[int]] = read_json(os.path.join(args.data_path, args.train_file), True)
+    train: dict[int, list[int]] = read_json(os.path.join(args.data_path, args.train_file), True)
     val = read_json(os.path.join(args.data_path, args.dev_file), True)
     test = read_json(os.path.join(args.data_path, args.test_file), True)
     item_meta_dict = json.load(open(os.path.join(args.data_path, args.meta_file)))
@@ -52,9 +52,6 @@ def parse_finetune_args():
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
     # data process
-    parser.add_argument(
-        "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
-    )
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     # model
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
@@ -83,6 +80,71 @@ def parse_finetune_args():
     parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=None, help="weightedsim: temp")
     parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=1)
     parser.add_argument("--encode_item_batch_size_multiplier", type=int, default=4)
+    return parser.parse_args()
+
+
+def parse_mlm_args():
+    parser = ArgumentParser()
+
+    parser.add_argument("--server", type=str, required=True)
+    # model
+    parser.add_argument("--mlm_ratio", type=float, default=0.15)
+
+    # path and file
+    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
+    parser.add_argument("--data_path", type=Path, default=None, required=True)
+    parser.add_argument("--output_dir", type=str, default="mlm-checkpoints")
+    parser.add_argument("--ckpt", type=str, default="best_model.bin")
+    parser.add_argument("--train_file", type=str, default="train.json")
+    parser.add_argument("--dev_file", type=str, default="val.json")
+    parser.add_argument("--test_file", type=str, default="test.json")
+    parser.add_argument("--item2id_file", type=str, default="smap.json")
+    parser.add_argument("--meta_file", type=str, default="meta_data.json")
+    # data process
+    parser.add_argument(
+        "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
+    )
+    parser.add_argument("--dataloader_num_workers", type=int, default=0)
+    # model
+    parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
+
+    trainer = parser.add_argument_group("Trainer")
+    trainer.add_argument("--learning_rate", type=float, default=3e-5)
+    trainer.add_argument("--batch_size", type=int, default=16)
+    trainer.add_argument("--mlm_batch_multiplier", type=int, default=4)
+    trainer.add_argument("--accelerator", type=str, default="cuda", help="Accelerator to use. Either 'cpu' or 'cuda'")
+    trainer.add_argument(
+        "--accumulate_grad_batches",
+        type=int,
+        default=1,
+        help="Number of batches to accumulate gradients over before performing an optimizer step",
+    )
+    trainer.add_argument("--strategy", type=str, default="auto", help="Distribution strategy.")
+    trainer.add_argument("--devices", type=int, default=1, help="Number of devices to train on (GPU or TPU).")
+    trainer.add_argument("--precision", type=str, default="32", help="Precision used for training.")
+    trainer.add_argument(
+        "--max_steps",
+        type=int,
+        default=6500,
+        help="Maximum number of training steps. If -1, train for as long as possible.",
+    )
+    trainer.add_argument(
+        "--val_check_interval", type=eval, default=1.0, help="Interval (in epochs) between validation checks."
+    )
+    trainer.add_argument("--gradient_clip_val", type=float, default=None, help="Gradient clipping value.")
+
+    parser.add_argument("--use_wandb", action="store_true", help="Whether to use wandb")
+
+    # Rec eval
+    parser.add_argument("--original_embedding", action="store_true")
+    parser.add_argument(
+        "--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean", "weightedsim", "topksim"]
+    )
+    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
+    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
+    parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=1)
+    parser.add_argument("--encode_item_batch_size_multiplier", type=int, default=4)
+
     return parser.parse_args()
 
 
