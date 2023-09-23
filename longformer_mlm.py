@@ -65,33 +65,32 @@ def main(args: argparse.Namespace):
 
     # Load datamodule
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
-    datamodule = RecMLMDataModule(mlm_ratio=args.mlm_ratio, tokenizer=tokenizer, user2train=train, user2val=val,
-                                  id2item=id2item, item_meta_dict=item_meta_dict, batch_size=args.batch_size,
-                                  mlm_batch_multiplier=args.mlm_batch_multiplier, num_workers=args.dataloader_num_workers)
-
-    doc_tuples = [
-        _par_tokenize_doc(doc, tokenizer) for doc in
-        tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
-    ]
-    tokenized_items = {
-        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
-        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
-    }
-    eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
-    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
-    test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
-    rec_val_loader = DataLoader(
-        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn,
-        num_workers=args.dataloader_num_workers
-    )
-    rec_test_loader = DataLoader(
-        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn,
-        num_workers=args.dataloader_num_workers
+    datamodule = RecMLMDataModule(
+        mlm_ratio=args.mlm_ratio,
+        tokenizer=tokenizer,
+        user2train=train,
+        user2val=val,
+        id2item=id2item,
+        item_meta_dict=item_meta_dict,
+        batch_size=args.batch_size,
+        mlm_batch_multiplier=args.mlm_batch_multiplier,
+        num_workers=args.dataloader_num_workers,
     )
 
-    module = RecMLM(args=args, config=config, model=model, tokenizer=tokenizer, learning_rate=args.learning_rate,
-                    tokenized_items=tokenized_items,
-                    rec_val_dataloader=rec_val_loader, rec_test_dataloader=rec_test_loader)
+    rec_test_loader, rec_val_loader, tokenized_items = load_session_dataset(
+        args, item2id, item_meta_dict, path_corpus, test, tokenizer, train, val
+    )
+
+    module = RecMLM(
+        args=args,
+        config=config,
+        model=model,
+        tokenizer=tokenizer,
+        learning_rate=args.learning_rate,
+        tokenized_items=tokenized_items,
+        rec_val_dataloader=rec_val_loader,
+        rec_test_dataloader=rec_test_loader,
+    )
 
     # logger
     loggers = [
@@ -118,7 +117,6 @@ def main(args: argparse.Namespace):
             save_top_k=1,
             filename="{epoch}-{val_loss:.2f}",
         ),
-
         pl.callbacks.EarlyStopping(
             monitor="val_loss",
             mode="min",
@@ -128,7 +126,6 @@ def main(args: argparse.Namespace):
     ]
 
     trainer = Trainer(
-        limit_test_batches=1,
         accelerator=args.accelerator,
         strategy=args.strategy,
         devices=args.devices,
@@ -146,7 +143,35 @@ def main(args: argparse.Namespace):
     trainer.test(ckpt_path="best", datamodule=datamodule)
 
     trainer.save_checkpoint(path_output / Path("model.ckpt"))
+    torch.save(module.model, path_output / "longformer_masked_mlm_model.bin")
     config.save_pretrained(path_output)
+
+
+def load_session_dataset(args, item2id, item_meta_dict, path_corpus, test, tokenizer, train, val):
+    doc_tuples = [
+        _par_tokenize_doc(doc, tokenizer)
+        for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+    ]
+    tokenized_items = {
+        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
+        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+    }
+    eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
+    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
+    test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
+    rec_val_loader = DataLoader(
+        val_data,
+        batch_size=args.batch_size * args.eval_test_batch_size_multiplier,
+        collate_fn=val_data.collate_fn,
+        num_workers=args.dataloader_num_workers,
+    )
+    rec_test_loader = DataLoader(
+        test_data,
+        batch_size=args.batch_size * args.eval_test_batch_size_multiplier,
+        collate_fn=test_data.collate_fn,
+        num_workers=args.dataloader_num_workers,
+    )
+    return rec_test_loader, rec_val_loader, tokenized_items
 
 
 if __name__ == "__main__":
