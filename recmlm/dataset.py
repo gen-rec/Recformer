@@ -49,10 +49,12 @@ class RecMLMDataModule(LightningDataModule):
         dataset = []
 
         for history in tqdm(histories, ncols=120, desc=f"Creating dataset"):
+            history = [self.item_meta_dict[self.id2item[item_id]] for item_id in history]
+            tokenized_history = self.tokenizer(history)
+
             while True:
                 masked_items = 0
-                history = [self.item_meta_dict[self.id2item[item_id]] for item_id in history]
-                tokenized_history = self.tokenizer(history)
+
                 tokenized_history["label"] = []
                 masked_input_ids = []
                 for idx, (input_id, token_id) in enumerate(
