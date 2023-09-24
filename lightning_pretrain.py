@@ -70,13 +70,19 @@ def main(args: Namespace):
         for param in pytorch_model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    model = LitWrapper(pytorch_model, learning_rate=args.learning_rate, warmup_steps=args.warmup_steps)
+    model = LitWrapper(
+        pytorch_model,
+        learning_rate=args.learning_rate,
+        warmup_steps=args.warmup_steps,
+        checkpoint_save_path=output_path,
+    )
 
     callbacks = [
         ModelCheckpoint(
             dirpath=output_path,
-            filename="{step}-{val/loss:.4f}",
+            filename="module_checkpoint_step_{step}-val_loss_{val/loss:.4f}.ckpt",
             every_n_train_steps=args.val_check_interval,
+            auto_insert_metric_name=False,
         ),
     ]
 
@@ -112,11 +118,13 @@ def main(args: Namespace):
         num_sanity_val_steps=2,
     )
 
+    if trainer.is_global_zero:
+        config.save_pretrained(output_path)
+
     trainer.fit(model, datamodule=datamodule)
 
     if trainer.is_global_zero:
         trainer.save_checkpoint(output_path / "checkpoint.ckpt")
-        config.save_pretrained(output_path)
         torch.save(pytorch_model.state_dict(), output_path / "model_state_dict.pt")
 
 

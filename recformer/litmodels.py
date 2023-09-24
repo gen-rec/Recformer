@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytorch_lightning as pl
 import torch
 from torch.optim import AdamW
@@ -8,14 +10,17 @@ class LitWrapper(pl.LightningModule):
     def __init__(
         self,
         model,
+        checkpoint_save_path: Path,
         learning_rate: float = 5e-5,
         warmup_steps: int = 0,
         weight_decay: float = 0.0,
     ):
         super().__init__()
 
-        self.save_hyperparameters(ignore=["model"])
+        self.save_hyperparameters(ignore=["model", "checkpoint_save_path"])
 
+        assert isinstance(checkpoint_save_path, Path)
+        self.checkpoint_save_path = checkpoint_save_path
         self.learning_rate = learning_rate
         self.warmup_steps = warmup_steps
         self.weight_decay = weight_decay
@@ -46,7 +51,15 @@ class LitWrapper(pl.LightningModule):
         self.log_dict({"val/loss": loss, "val/accuracy": accuracy}, on_epoch=True, prog_bar=True, sync_dist=True)
 
     def on_validation_epoch_end(self):
-        torch.save(self.model.state_dict(), f"model_state_dict_step_{self.global_step}.pt")
+        if self.trainer.is_global_zero:
+            torch.save(
+                self.model.state_dict(),
+                self.checkpoint_save_path / f"recformer_for_pretraining_step_{self.global_step}.pt",
+            )
+            torch.save(
+                self.model.longformer.state_dict(),
+                self.checkpoint_save_path / f"longformer_model_step_{self.global_step}.pt",
+            )
 
     def configure_optimizers(self):
         model = self.model
