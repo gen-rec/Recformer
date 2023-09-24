@@ -4,7 +4,7 @@ from typing import Union, List
 
 import pytorch_lightning as pl
 import torch
-from transformers import LongformerForMaskedLM
+from transformers import LongformerForMaskedLM, get_constant_schedule_with_warmup
 
 from finetune import encode_all_items, evaluate
 from recformer import RecformerConfig, RecformerForSeqRec, RecformerTokenizer
@@ -141,5 +141,6 @@ class RecMLM(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
-        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}
+        scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=1000)
+
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]

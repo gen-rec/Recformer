@@ -70,6 +70,7 @@ def main(args: argparse.Namespace):
         tokenizer=tokenizer,
         user2train=train,
         user2val=val,
+        user2test=test,
         id2item=id2item,
         item_meta_dict=item_meta_dict,
         batch_size=args.batch_size,
@@ -111,14 +112,14 @@ def main(args: argparse.Namespace):
     # Setup trainer
     callbacks = [
         pl.callbacks.ModelCheckpoint(
-            monitor="rec_metric/Recall@10",
+            monitor="val/rec_metric/Recall@10",
             dirpath=path_output,
             mode="max",
             save_top_k=15,
-            filename="{epoch}-{rec_metric/Recall@10:.2f}",
+            filename="{epoch}-{val/rec_metric/Recall@10:.2f}",
         ),
         pl.callbacks.EarlyStopping(
-            monitor="rec_metric/Recall@10",
+            monitor="val/rec_metric/Recall@10",
             mode="max",
             patience=5,
             verbose=True,

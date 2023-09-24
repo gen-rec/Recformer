@@ -10,16 +10,17 @@ __all__ = ["RecMLMDataModule", "RecMLMDataset"]
 
 class RecMLMDataModule(LightningDataModule):
     def __init__(
-        self,
-        mlm_ratio: float,
-        tokenizer: RecformerTokenizer,
-        user2train: dict[int, list[int]],
-        user2val: dict[int, list[int]] | None,
-        id2item: dict[int, str],
-        item_meta_dict: dict[int, dict[str, str]],
-        batch_size: int,
-        mlm_batch_multiplier: int,
-        num_workers: int = 0,
+            self,
+            mlm_ratio: float,
+            tokenizer: RecformerTokenizer,
+            user2train: dict[int, list[int]],
+            user2val: dict[int, list[int]] | None,
+            user2test: dict[int, list[int]] | None,
+            id2item: dict[int, str],
+            item_meta_dict: dict[int, dict[str, str]],
+            batch_size: int,
+            mlm_batch_multiplier: int,
+            num_workers: int = 0,
     ):
 
         super().__init__()
@@ -27,6 +28,7 @@ class RecMLMDataModule(LightningDataModule):
         self.tokenizer = tokenizer
         self.user2train = user2train
         self.user2val = user2val
+        self.user2test = user2test
         self.id2item = id2item
         self.item_meta_dict = item_meta_dict
         self.batch_size = batch_size * mlm_batch_multiplier
@@ -38,9 +40,10 @@ class RecMLMDataModule(LightningDataModule):
         self.test_dataset = self.tokenize_dataset(self.test_history)
 
     def get_history(self):
-        train_histories = list(list(self.user2train.values())[:-1])
-        valid_histories = list(list(self.user2train.values()))
-        test_histories = [self.user2train[user] + self.user2val[user] for user in self.user2val.keys()]
+        train_histories = list(list(self.user2train.values()))
+        valid_histories = [self.user2train[user] + self.user2val[user] for user in self.user2val.keys()]
+        test_histories = [self.user2train[user] + self.user2val[user] + self.user2test[user] for user in
+                          self.user2test.keys()]
 
         return train_histories, valid_histories, test_histories
 
@@ -58,7 +61,7 @@ class RecMLMDataModule(LightningDataModule):
                 tokenized_history["label"] = []
                 masked_input_ids = []
                 for idx, (input_id, token_id) in enumerate(
-                    zip(tokenized_history["input_ids"], tokenized_history["token_type_ids"])
+                        zip(tokenized_history["input_ids"], tokenized_history["token_type_ids"])
                 ):
                     if token_id == 0:  # bos token
                         is_mask = False
