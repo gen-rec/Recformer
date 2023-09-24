@@ -88,7 +88,7 @@ class RecMLM(pl.LightningModule):
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
-    def on_validation_end(self):
+    def on_train_epoch_end(self):
         self.evaluate_rec()
 
     def test_step(self, batch, batch_idx):
@@ -104,6 +104,7 @@ class RecMLM(pl.LightningModule):
     def on_test_end(self) -> None:
         self.evaluate_rec()
 
+    @torch.no_grad()
     def evaluate_rec(self):
         recformer = RecformerForSeqRec(self.config)
         state_dict = self.model.longformer.state_dict()
