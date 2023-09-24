@@ -15,7 +15,8 @@ from recformer import RecformerTokenizer
 class RecformerDataset(Dataset):
     def __init__(self, dataset: List):
         super().__init__()
-        self.dataset = dataset
+        self.dataset = [sess for sess in dataset if len(sess) > 1]
+        print(f"Filtered {len(dataset) - len(self.dataset)} sessions")
 
     def __len__(self):
         return len(self.dataset)
@@ -108,6 +109,7 @@ class RecformerDataModule(LightningDataModule):
                 tokenizer=self.tokenizer,
                 tokenized_items=self.tokenized_items,
                 mlm_probability=self.mlm_probability,
+                is_valid=True,
             ),
             shuffle=False,
         )

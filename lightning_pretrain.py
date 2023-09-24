@@ -4,8 +4,9 @@ from pathlib import Path
 
 import torch
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger, CSVLogger
+from pytorch_lightning.strategies import DDPStrategy
 
 from lightning_dataloader import RecformerDataModule
 from recformer import RecformerForPretraining, LitWrapper, RecformerConfig, RecformerTokenizer
@@ -77,12 +78,6 @@ def main(args: Namespace):
             filename="{step}-{val/loss:.4f}",
             every_n_train_steps=args.val_check_interval,
         ),
-        EarlyStopping(
-            monitor="val/loss",
-            patience=5,
-            verbose=True,
-            mode="min",
-        ),
     ]
 
     loggers = [
@@ -103,9 +98,9 @@ def main(args: Namespace):
 
     trainer = Trainer(
         accelerator="auto",
-        strategy="auto",
+        strategy=DDPStrategy(find_unused_parameters=True),
         max_epochs=args.max_epochs,
-        num_nodes=2,
+        num_nodes=1,
         accumulate_grad_batches=args.gradient_accumulation_steps,
         val_check_interval=args.val_check_interval,
         default_root_dir=args.output_dir,

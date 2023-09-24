@@ -715,6 +715,17 @@ class RecformerForPretraining(nn.Module):
             mlm_loss_b = 0
 
         loss = ce_loss + mlm_loss_a + mlm_loss_b
+        if torch.isnan(loss):
+            print("z1", z1)
+            print("z2", z2)
+            print("z1_mask", z1_mask)
+            print("z2_mask", z2_mask)
+            print("scores", scores)
+            print("cos_sim", cos_sim)
+            print("labels", labels)
+            print("ce_loss", ce_loss)
+            print("mlm_loss_a", mlm_loss_a)
+            print("mlm_loss_b", mlm_loss_b)
 
         return RecformerPretrainingOutput(
             loss=loss,

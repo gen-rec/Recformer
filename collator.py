@@ -10,10 +10,11 @@ from recformer import RecformerTokenizer
 
 # Data collator
 class PretrainDataCollatorWithPadding:
-    def __init__(self, tokenizer: RecformerTokenizer, tokenized_items: Dict, mlm_probability: float):
+    def __init__(self, tokenizer: RecformerTokenizer, tokenized_items: Dict, mlm_probability: float, is_valid=False):
         self.tokenizer = tokenizer
         self.tokenized_items = tokenized_items
         self.mlm_probability = mlm_probability
+        self.is_valid = is_valid
 
     def __call__(
         self, batch_item_ids: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]
@@ -55,16 +56,25 @@ class PretrainDataCollatorWithPadding:
         return batch
 
     def sample_pairs(self, batch_item_ids):
-
         batch_item_seq_a = []
         batch_item_seq_b = []
 
-        for item_ids in batch_item_ids:
-            item_seq_len = len(item_ids)
-            start = (item_seq_len - 1) // 2
-            target_pos = random.randint(start, item_seq_len - 1)
-            batch_item_seq_a.append(item_ids[:target_pos])
-            batch_item_seq_b.append([item_ids[target_pos]])
+        if self.is_valid:
+            # Do not sample negative pairs for validation
+            for item_ids in batch_item_ids:
+                batch_item_seq_a.append(item_ids[:-1])
+                batch_item_seq_b.append([item_ids[-1]])
+
+        else:
+            for item_ids in batch_item_ids:
+                item_seq_len = len(item_ids)
+                start = min(1, (item_seq_len - 1) // 2)
+                target_pos = random.randint(start, item_seq_len - 1)
+                batch_item_seq_a.append(item_ids[:target_pos])
+                batch_item_seq_b.append([item_ids[target_pos]])
+
+        assert len(batch_item_seq_a) > 0, "batch_item_seq_a is empty"
+        assert len(batch_item_seq_b) > 0, "batch_item_seq_b is empty"
 
         return batch_item_seq_a, batch_item_seq_b
 
