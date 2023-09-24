@@ -237,19 +237,19 @@ def main(args):
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
-    model.init_item_embedding(item_embeddings)
+    # item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    #
+    # model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
 
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = evaluate(model, test_loader, args)
-    if wandb_logger is not None:
-        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-    print(f"Test set Zero-shot: {test_metrics}")
+    # test_metrics = evaluate(model, test_loader, args)
+    # if wandb_logger is not None:
+    #     wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+    # print(f"Test set Zero-shot: {test_metrics}")
 
     best_target = float("-inf")
     patient = 5
@@ -281,7 +281,6 @@ def main(args):
 
     print("Load best model in stage 1.")
     model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
-    torch.save(item_embeddings, path_output / "stage_1_item_embeddings.pt")
 
     test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
