@@ -72,7 +72,11 @@ def main(args: Namespace):
     model = LitWrapper(pytorch_model, learning_rate=args.learning_rate, warmup_steps=args.warmup_steps)
 
     callbacks = [
-        ModelCheckpoint(save_top_k=5, monitor="accuracy", mode="max", filename="{epoch}-{accuracy:.4f}"),
+        ModelCheckpoint(
+            dirpath=output_path,
+            filename="{step}-{val/loss:.4f}",
+            every_n_train_steps=args.val_check_interval,
+        ),
         EarlyStopping(
             monitor="val/loss",
             patience=5,

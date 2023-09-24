@@ -1,4 +1,5 @@
 import pytorch_lightning as pl
+import torch
 from torch.optim import AdamW
 from transformers import get_linear_schedule_with_warmup
 
@@ -43,6 +44,9 @@ class LitWrapper(pl.LightningModule):
             accuracy = correct_num / total_num
 
         self.log_dict({"val/loss": loss, "val/accuracy": accuracy}, on_epoch=True, prog_bar=True, sync_dist=True)
+
+    def on_validation_epoch_end(self):
+        torch.save(self.model.state_dict(), f"model_state_dict_step_{self.global_step}.pt")
 
     def configure_optimizers(self):
         model = self.model

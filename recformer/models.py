@@ -224,12 +224,12 @@ class RecformerPooler(nn.Module):
 
             attr_mask = torch.eq(
                 attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
-            )
+            )  # (bs, attr_num, seq_len)
             item_mask = torch.eq(
                 item_position_ids.unsqueeze(1),
                 torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
             )
-            attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
+            attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))  # Ignore tokens that are False
 
             hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
 
@@ -237,9 +237,8 @@ class RecformerPooler(nn.Module):
             summed_states = torch.sum(hidden_states_pooled, dim=3)  # Sum across the sequence length dimension
 
             # Count the number of valid (not masked out) elements in the attr_item_mask for each position
-            valid_counts = attr_item_mask.sum(dim=3).unsqueeze(
-                -1
-            )  # Adding an extra dimension to match the dimensionality for division
+            valid_counts = attr_item_mask.sum(dim=3)
+            valid_counts.unsqueeze_(-1)  # Adding an extra dimension to match the dimensionality for division
 
             valid_counts_eq_0 = torch.eq(valid_counts, 0)
 
@@ -638,7 +637,7 @@ class RecformerForPretraining(nn.Module):
         # Gather all embeddings if using distributed training
         if self.training and distributed.is_initialized():
             # Pad z1 to (bs, attr_num, max_item_embeddings, hidden_size)
-            z1_padded = torch.empty(
+            z1_padded = torch.ones(
                 (batch_size, z1.size(1), self.config.max_item_embeddings, z1.size(3)), device=z1.device
             )
             z1_padded[:, :, : z1.size(2), :] = z1
@@ -661,7 +660,7 @@ class RecformerForPretraining(nn.Module):
             z2 = torch.cat(z2_list, 0)
 
             if z1_mask is not None and z2_mask is not None:
-                z1_mask_padded = torch.ones(
+                z1_mask_padded = torch.zeros(
                     (batch_size, z1_mask.size(1), self.config.max_item_embeddings), dtype=torch.bool, device=z1_mask.device
                 )
                 z1_mask_padded[:, :, : z1_mask.size(2)] = z1_mask
@@ -686,7 +685,7 @@ class RecformerForPretraining(nn.Module):
 
         scores = self.sim.forward(z1, z2)  # (bs, bs, attr_num, items_max)
 
-        mask = torch.add(z1_mask, z2_mask)  # (bs, bs, attr_num, items_max)
+        mask = torch.add(z1_mask, z2_mask)  # (bs, bs, attr_num, items_max)  # True to mask
         scores[mask] = -torch.inf
 
         cos_sim = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)  # (bs, bs)
