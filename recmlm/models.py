@@ -4,7 +4,7 @@ from typing import Union, List
 
 import pytorch_lightning as pl
 import torch
-from transformers import LongformerForMaskedLM, LongformerConfig
+from transformers import LongformerForMaskedLM
 
 from finetune import encode_all_items, evaluate
 from recformer import RecformerConfig, RecformerForSeqRec, RecformerTokenizer
@@ -78,9 +78,6 @@ class RecMLM(pl.LightningModule):
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
-    def on_train_epoch_end(self):
-        self.evaluate_rec()
-
     def validation_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
@@ -90,6 +87,9 @@ class RecMLM(pl.LightningModule):
         loss = outputs.loss
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
+
+    def on_validation_end(self):
+        self.evaluate_rec()
 
     def test_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]
@@ -121,7 +121,10 @@ class RecMLM(pl.LightningModule):
         recformer.to(torch.device("cpu"))
         del recformer
 
-        self.trainer.logger.log_metrics({f"rec_metric/{k}": v for k, v in test_metrics.items()})
+        pprint(test_metrics)
+
+        for logger in self.trainer.loggers:
+            logger.log_metrics({f"rec_metric/{k}": v for k, v in test_metrics.items()})
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate)

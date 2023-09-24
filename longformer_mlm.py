@@ -111,15 +111,15 @@ def main(args: argparse.Namespace):
     # Setup trainer
     callbacks = [
         pl.callbacks.ModelCheckpoint(
-            monitor="val_loss",
+            monitor="rec_metric/Recall@10",
             dirpath=path_output,
-            mode="min",
-            save_top_k=1,
-            filename="{epoch}-{val_loss:.2f}",
+            mode="max",
+            save_top_k=15,
+            filename="{epoch}-{rec_metric/Recall@10:.2f}",
         ),
         pl.callbacks.EarlyStopping(
-            monitor="val_loss",
-            mode="min",
+            monitor="rec_metric/Recall@10",
+            mode="max",
             patience=5,
             verbose=True,
         ),
