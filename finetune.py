@@ -228,8 +228,8 @@ def main(args):
     )
 
     model = RecformerForSeqRec(config)
-    pretrain_ckpt = torch.load(args.pretrain_ckpt)
-    model.load_state_dict(pretrain_ckpt, strict=False)
+    pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
+    print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
 
     if args.fix_word_embedding:

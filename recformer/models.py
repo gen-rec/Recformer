@@ -90,9 +90,18 @@ class RecformerEmbeddings(nn.Module):
 
     def __init__(self, config: RecformerConfig):
         super().__init__()
+
+        try:
+            self.original_embedding = config.original_embedding
+        except AttributeError:
+            self.original_embedding = None
+
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        self.token_type_embeddings = nn.Embedding(config.token_type_size, config.hidden_size)
+        if self.original_embedding:
+            self.token_type_embeddings = nn.Embedding(1, config.hidden_size)
+        else:
+            self.token_type_embeddings = nn.Embedding(config.token_type_size, config.hidden_size)
         self.item_position_embeddings = nn.Embedding(config.max_item_embeddings, config.hidden_size)
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
@@ -132,8 +141,8 @@ class RecformerEmbeddings(nn.Module):
             else:
                 input_shape = inputs_embeds.size()[:-1]
 
-            if token_type_ids is None:
-                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
+            # Ignore items
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
 
             if inputs_embeds is None:
                 inputs_embeds = self.word_embeddings(input_ids)
