@@ -313,7 +313,10 @@ def main(args):
                         break
 
         print("Load best model in stage 2.")
-        model.load_state_dict(torch.load(path_output / "stage_2_best.pt"))
+        try:
+            model.load_state_dict(torch.load(path_output / "stage_2_best.pt"))
+        except FileNotFoundError:
+            print("No best model in stage 2. Use the latest model.")
 
         test_metrics = evaluate(model, test_loader, args)
         print(f"Stage-2 Test set: {test_metrics}")
