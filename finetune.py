@@ -239,9 +239,9 @@ def main(args):
         state_dict = torch.load(args.pretrain_ckpt)['state_dict']
         new_state_dict = {}
         for k, v in state_dict.items():
-            if 'model.longformer.' in k:
-                new_state_dict[k.replace('model.longformer.', '')] = v
-        del new_state_dict["embeddings.token_type_embeddings.weight"]
+            if 'model.' in k:
+                new_state_dict[k.replace('model.', '')] = v
+        del new_state_dict["longformer.embeddings.token_type_embeddings.weight"]
         model.load_state_dict(new_state_dict, strict=False)
     else:
         pretrain_ckpt = torch.load(args.pretrain_ckpt)
