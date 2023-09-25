@@ -1,4 +1,5 @@
 import argparse
+from pathlib import Path
 from pprint import pprint
 from typing import Union, List
 
@@ -41,6 +42,7 @@ class RecMLM(pl.LightningModule):
         tokenized_items: dict,
         rec_val_dataloader: torch.utils.data.DataLoader,
         rec_test_dataloader: torch.utils.data.DataLoader,
+        checkpoint_save_path: Path,
     ):
         super().__init__()
         self.args = args
@@ -52,6 +54,8 @@ class RecMLM(pl.LightningModule):
         self.tokenized_items = tokenized_items
         self.rec_valid_dataloader = rec_val_dataloader
         self.rec_test_dataloader = rec_test_dataloader
+
+        self.checkpoint_save_path = checkpoint_save_path
 
     def forward(self, input_ids, attention_mask, global_attention_mask, label, *args, **kwargs):
         outputs = self.model(
@@ -94,6 +98,10 @@ class RecMLM(pl.LightningModule):
         self.log_dict(
             {f"val/rec_metric/{k}": v for k, v in metrics.items()}, on_step=False, on_epoch=True, prog_bar=True, logger=True
         )
+
+    def on_validation_epoch_end(self):
+        if self.trainer.is_global_zero:
+            torch.save(self.model.state_dict(), self.checkpoint_save_path / f"longformer_epoch_{self.current_epoch}.pt")
 
     def test_step(self, batch, batch_idx):
         input_ids = batch["input_ids"]

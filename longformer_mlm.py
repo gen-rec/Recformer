@@ -91,6 +91,7 @@ def main(args: argparse.Namespace):
         tokenized_items=tokenized_items,
         rec_val_dataloader=rec_val_loader,
         rec_test_dataloader=rec_test_loader,
+        checkpoint_save_path=path_output,
     )
 
     # logger
@@ -112,11 +113,10 @@ def main(args: argparse.Namespace):
     # Setup trainer
     callbacks = [
         pl.callbacks.ModelCheckpoint(
-            monitor="val/rec_metric/Recall@10",
             dirpath=path_output,
-            mode="max",
-            save_top_k=15,
-            filename="{epoch}-{val/rec_metric/Recall@10:.2f}",
+            every_n_epochs=1,
+            filename="epoch_{epoch}-r10_{rec_metric/Recall@10:.2f}",
+            auto_insert_metric_name=False,
         ),
         pl.callbacks.EarlyStopping(
             monitor="val/rec_metric/Recall@10",
@@ -140,12 +140,10 @@ def main(args: argparse.Namespace):
         gradient_clip_val=args.gradient_clip_val,
     )
 
+    config.save_pretrained(path_output)
+
     trainer.fit(module, datamodule=datamodule)
     trainer.test(ckpt_path="best", datamodule=datamodule)
-
-    trainer.save_checkpoint(path_output / Path("model.ckpt"))
-    torch.save(module.model, path_output / "longformer_masked_mlm_model.bin")
-    config.save_pretrained(path_output)
 
 
 def load_session_dataset(args, item2id, item_meta_dict, path_corpus, test, tokenizer, train, val):
