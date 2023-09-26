@@ -254,8 +254,8 @@ def main():
         _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
     ]
     tokenized_items = {
-        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
-        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+        item2id[item_id]: [input_ids, token_type_ids]
+        for item_id, input_ids, token_type_ids in doc_tuples
     }
 
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
