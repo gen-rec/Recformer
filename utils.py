@@ -82,6 +82,8 @@ def parse_finetune_args():
     parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=None, help="weightedsim: temp")
     parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=1)
     parser.add_argument("--encode_item_batch_size_multiplier", type=int, default=4)
+    parser.add_argument("--random_word", type=str, default=None)
+    parser.add_argument("--zero_shot_only", action="store_true")
     return parser.parse_args()
 
 
