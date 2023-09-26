@@ -1,20 +1,24 @@
 import json
 import os
 from argparse import ArgumentParser
-from multiprocessing import Pool
+from datetime import datetime
 from pathlib import Path
 
 import torch
+import wandb
 from pytorch_lightning import seed_everything
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from wonderwords import RandomWord
 
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
 from utils import read_json, AverageMeterSet, Ranker
+
+wandb_logger: wandb.sdk.wandb_run.Run | None = None
 
 
 def load_data(args):
@@ -108,7 +112,10 @@ def eval(model, dataloader, args):
     return average_metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
+def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, step: int):
+    global wandb_logger
+
+    epoch_losses = []
 
     model.train()
 
@@ -121,6 +128,10 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
                 loss = model(**batch)
         else:
             loss = model(**batch)
+
+        if wandb_logger is not None:
+            wandb_logger.log({f"train_step_{step}/loss": loss.item()})
+            epoch_losses.append(loss.item())
 
         if args.gradient_accumulation_steps > 1:
             loss = loss / args.gradient_accumulation_steps
@@ -148,6 +159,9 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args):
                 scheduler.step()  # Update learning rate schedule
                 optimizer.step()
                 optimizer.zero_grad()
+
+    if wandb_logger is not None:
+        wandb_logger.log({f"train_step_{step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
 
 
 def main():
@@ -191,6 +205,7 @@ def main():
 
     args = parser.parse_args()
     print(args)
+
     seed_everything(42)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
@@ -209,32 +224,42 @@ def main():
     global tokenizer_glb
     tokenizer_glb = tokenizer
 
+    random_word_generator = RandomWord()
+    random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
+    random_word_and_date = random_word + "_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+
     path_corpus = Path(args.data_path)
-    dir_preprocess = path_corpus / "preprocess"
-    dir_preprocess.mkdir(exist_ok=True)
+    path_output = Path(args.output_dir) / random_word
 
-    path_output = Path(args.output_dir) / path_corpus.name
-    path_output.mkdir(exist_ok=True, parents=True)
+    try:
+        path_output.mkdir(exist_ok=False, parents=True)
+    except FileExistsError:
+        raise FileExistsError(f"Output directory ({path_output}) already exists.")
 
-    path_tokenized_items = dir_preprocess / f"tokenized_items_{path_corpus.name}"
+    global wandb_logger
+    wandb_logger = wandb.init(
+        project="Baseline-Recformer",
+        entity="gen-rec",
+        name=random_word_and_date,
+        group=path_corpus.name,
+        config=vars(args),
+        tags=[
+            path_corpus.name,
+            f"pool_{args.pooler_type}",
+            f"reduce_session_{args.session_reduce_method}",
+            f"global_attn_{args.global_attention}",
+        ],
+    )
 
-    if path_tokenized_items.exists():
-        print(f"[Preprocessor] Use cache: {path_tokenized_items}")
-    else:
-        print(f"Loading attribute data {path_corpus}")
-        pool = Pool(processes=args.preprocessing_num_workers)
-        pool_func = pool.imap(func=_par_tokenize_doc, iterable=item_meta_dict.items())
-        doc_tuples = list(tqdm(pool_func, total=len(item_meta_dict), ncols=100, desc=f"[Tokenize] {path_corpus}"))
-        tokenized_items = {
-            item2id[item_id]: [input_ids, token_type_ids] for item_id, input_ids, token_type_ids in doc_tuples
-        }
-        pool.close()
-        pool.join()
+    path_ckpt = path_output / args.ckpt
 
-        torch.save(tokenized_items, path_tokenized_items)
-
-    tokenized_items = torch.load(path_tokenized_items)
-    print(f"Successfully load {len(tokenized_items)} tokenized items.")
+    doc_tuples = [
+        _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+    ]
+    tokenized_items = {
+        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
+        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+    }
 
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
@@ -272,7 +297,9 @@ def main():
         scaler = None
 
     test_metrics = eval(model, test_loader, args)
-    print(f"Test set: {test_metrics}")
+    if wandb_logger is not None:
+        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+    print(f"Test set Zero-shot: {test_metrics}")
 
     best_target = float("-inf")
     patient = 5
@@ -282,11 +309,14 @@ def main():
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
+        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = eval(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+
+            if wandb_logger is not None:
+                wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
 
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
@@ -300,27 +330,25 @@ def main():
                     break
 
     print("Load best model in stage 1.")
+    model.load_state_dict(torch.load(path_ckpt))
 
-    model.load_state_dict(torch.load(path_output / "stage_1_best_model.pt"))
-
-    print("Test with embedding from stage 1.")
     test_metrics = eval(model, test_loader, args)
-    print(f"[RESULT0] Test set: {test_metrics}")
+    print(f"Test set: {test_metrics}")
 
-    print("Test with reloading item embeddings.")
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-    model.init_item_embedding(item_embeddings)
-    test_metrics = eval(model, test_loader, args)
-    print(f"[RESULT1] Test set: {test_metrics}")
+    if wandb_logger is not None:
+        wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
 
     patient = 3
     for epoch in range(args.num_train_epochs):
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
+        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args, 2)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = eval(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+
+            if wandb_logger is not None:
+                wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
@@ -334,16 +362,16 @@ def main():
                     break
 
     print("Test with the best checkpoint.")
-    model.load_state_dict(torch.load(path_output / "stage_2_best_model.pt"))
-    test_metrics = eval(model, test_loader, args)
-    print(f"[RESULT2] Test set: {test_metrics}")
-
-    print("Test with reloading item embeddings.")
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-    model.init_item_embedding(item_embeddings)
+    try:
+        model.load_state_dict(torch.load(path_output / "stage_2_best_model.pt"))
+    except FileNotFoundError:
+        print("No best checkpoint. Use the last checkpoint.")
 
     test_metrics = eval(model, test_loader, args)
-    print(f"[RESULT3] Test set: {test_metrics}")
+    print(f"Test set: {test_metrics}")
+
+    if wandb_logger is not None:
+        wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
 
 
 if __name__ == "__main__":
