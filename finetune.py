@@ -245,9 +245,6 @@ def main():
         config=vars(args),
         tags=[
             path_corpus.name,
-            f"pool_{args.pooler_type}",
-            f"reduce_session_{args.session_reduce_method}",
-            f"global_attn_{args.global_attention}",
         ],
     )
 
