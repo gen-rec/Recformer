@@ -236,13 +236,10 @@ def main(args):
 
     model = RecformerForSeqRec(config)
     if 'mlm' in args.pretrain_ckpt:
-        state_dict = torch.load(args.pretrain_ckpt)['state_dict']
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if 'model.' in k:
-                new_state_dict[k.replace('model.', '')] = v
-        del new_state_dict["longformer.embeddings.token_type_embeddings.weight"]
-        model.load_state_dict(new_state_dict, strict=False)
+        state_dict = torch.load(args.pretrain_ckpt)
+        del state_dict["longformer.embeddings.token_type_embeddings.weight"]
+        missing = model.load_state_dict(state_dict, strict=False)
+        print(f"Missing keys: {missing.missing_keys}")
     else:
         pretrain_ckpt = torch.load(args.pretrain_ckpt)
         model.load_state_dict(pretrain_ckpt, strict=False)
