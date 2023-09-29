@@ -9,10 +9,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from wonderwords import RandomWord
 
-from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
+from collator import EvalDataCollatorWithPadding, JointLearningDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig, reduce_session
+from recformer import RecformerModel, RecformerTokenizer, RecformerConfig, reduce_session, \
+    RecformerJointLearning
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
@@ -141,15 +142,26 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 
     model.train()
 
-    for step, batch in enumerate(tqdm(dataloader, ncols=100, desc="Training")):
+    tq = tqdm(dataloader, ncols=100, desc="Training")
+    for step, batch in enumerate(tq):
         for k, v in batch.items():
             batch[k] = v.to(args.device)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            loss = model(**batch)
+            if isinstance(model, RecformerJointLearning):
+                loss, ce_loss, mlm_loss, weight = model(**batch)
+                loss_dict = {
+                    f"train_step_{train_step}/loss": loss.item(),
+                    f"train_step_{train_step}/ce_loss": ce_loss.item(),
+                    f"train_step_{train_step}/mlm_loss": mlm_loss.item(),
+                    f"train_step_{train_step}/weight": weight,
+                }
+            else:
+                loss = model(**batch)
+                loss_dict = {f"train_step_{train_step}/loss": loss.item()}
 
         if wandb_logger is not None:
-            wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
+            wandb_logger.log(loss_dict)
             epoch_losses.append(loss.item())
 
         if args.gradient_accumulation_steps > 1:
@@ -221,7 +233,7 @@ def main(args):
         for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
     }
 
-    finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
+    finetune_data_collator = JointLearningDataCollatorWithPadding(tokenizer, tokenized_items, mlm_ratio=0.2)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
     train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
@@ -236,8 +248,15 @@ def main(args):
         test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
     )
 
-    model = RecformerForSeqRec(config)
+    model = RecformerJointLearning(config, len(train_data) // args.batch_size * 10)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
+
+    if config.original_embedding:
+        weight = pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]
+
+        if weight.shape != model.longformer.embeddings.token_type_embeddings.weight.shape:
+            del pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]
+
     print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
 

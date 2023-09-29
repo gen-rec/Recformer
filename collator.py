@@ -385,3 +385,92 @@ class EvalDataCollatorWithPadding:
             features.append(self.tokenizer.encode(feature, encode_item=False))
 
         return features
+
+
+@dataclass
+class JointLearningDataCollatorWithPadding(FinetuneDataCollatorWithPadding):
+
+    mlm_ratio: float
+
+    def __call__(
+        self, batch_item_ids: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]
+    ) -> Dict[str, torch.Tensor]:
+        batch = super().__call__(batch_item_ids)
+
+        batch["mlm_input_ids"], batch["mlm_labels"] = self.mask_mlm(batch)
+
+        return batch
+
+    def mask_mlm(self, batch):
+        masked_input_ids = []
+        masked_labels = []
+
+        input_ids = batch["input_ids"].tolist()
+        token_type_ids = batch["token_type_ids"].tolist()
+
+        for batch_idx in range(batch["input_ids"].shape[0]):
+            input_id = input_ids[batch_idx]
+            token_type_id = token_type_ids[batch_idx]
+
+            while True:
+                masked_items = 0
+                masked_input_id = []
+                masked_label = []
+
+                for idx, (input_, token_) in enumerate(zip(input_id, token_type_id)):
+                    is_mask = False
+                    if token_ == 0 or token_ == 3:  # bos token or mask
+                        is_mask = False
+                        masked_input_id.append(input_)
+                    elif token_ == 1:  # item token
+                        is_mask = False
+                        masked_input_id.append(input_)
+                    elif token_ == 2 and token_type_id[idx - 1] == 1:
+                        # mask with mlm_ratio
+                        is_mask = torch.rand(1) < self.mlm_ratio
+                        if is_mask:
+                            masked_items += 1
+                        masked_input_id.append(self.tokenizer.mask_token_id if is_mask else input_)
+                    elif token_ == 2:
+                        masked_input_id.append(self.tokenizer.mask_token_id if is_mask else input_)
+                    else:
+                        raise ValueError(f"Invalid token type id: {token_}")
+
+                    if is_mask:
+                        masked_label.append(input_)
+                    else:
+                        masked_label.append(-100)
+
+                if masked_items > 0:
+                    break
+
+            masked_input_ids.append(masked_input_id)
+            masked_labels.append(masked_label)
+
+        masked_input_ids = torch.tensor(masked_input_ids)
+        masked_labels = torch.tensor(masked_labels)
+
+        return masked_input_ids, masked_labels
+
+    # def mask_mlm(self, batch):
+    #     num_items = batch["item_position_ids"].clone()
+    #     num_items[num_items == 50] = -100
+    #     num_items = num_items.max(dim=1).values
+    #
+    #     mlm_input_ids = []
+    #     mlm_labels = []
+    #
+    #     for num_item, input_id, token_type_id, label in zip(
+    #         num_items, batch["input_ids"], batch["token_type_ids"], batch["labels"]
+    #     ):
+    #         while True:
+    #             do_mask = torch.greater(torch.rand(num_item * 3), self.mlm_prob)
+    #
+    #             if torch.any(do_mask):
+    #                 break
+    #
+    #         mask_input_id = input_id.clone()
+    #         # Find index of value 1
+    #         token_type_id_ones = torch.where(token_type_id == 1)[0]
+
+

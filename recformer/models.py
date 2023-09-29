@@ -304,6 +304,112 @@ class RecformerPooler(nn.Module):
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")
 
 
+class RecformerJointLearning(LongformerPreTrainedModel):
+    def __init__(self, config: RecformerConfig, mlm_warmup_steps: int):
+        super().__init__(config)
+
+        self.longformer = RecformerModel(config)
+        self.lm_head = LongformerLMHead(config)
+        self.sim = Similarity(config)
+        self.item_embedding = None
+
+        self.post_init()
+
+        self.mlm_warmup_steps = mlm_warmup_steps
+        self._current_mlm_step = 0
+
+    def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
+        if embeddings is None:
+            raise ValueError("embeddings must be provided.")
+
+        self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
+
+    def similarity_score(self, pooler_output, candidates=None):
+        if candidates is not None:
+            raise NotImplementedError("Negative sampling disabled")
+
+        candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
+        pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
+        sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
+
+        return sim
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        global_attention_mask: Optional[torch.Tensor] = None,
+        head_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
+        attr_type_ids: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        item_position_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        candidates: Optional[torch.Tensor] = None,  # candidate item ids
+        labels: Optional[torch.Tensor] = None,  # target item ids
+        mlm_input_ids: Optional[torch.Tensor] = None,
+        mlm_labels: Optional[torch.Tensor] = None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        batch_size = input_ids.size(0)
+
+        outputs = self.longformer(
+            input_ids,
+            attention_mask=attention_mask,
+            global_attention_mask=global_attention_mask,
+            head_mask=head_mask,
+            token_type_ids=token_type_ids,
+            attr_type_ids=attr_type_ids,
+            position_ids=position_ids,
+            item_position_ids=item_position_ids,
+            inputs_embeds=inputs_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+
+        pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
+        pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
+
+        if labels is None:
+            return self.similarity_score(pooler_output, candidates)
+
+        loss_fct = CrossEntropyLoss()
+
+        scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+
+        all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+        final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+        scores[final_mask] = -torch.inf
+
+        scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)
+
+        if labels.dim() == 2:
+            labels = labels.squeeze(dim=-1)
+        ce_loss = loss_fct(scores, labels)
+
+        if mlm_input_ids is not None and mlm_labels is not None and self._current_mlm_step < self.mlm_warmup_steps:
+            mlm_labels = mlm_labels.view(-1, mlm_labels.size(-1))
+            prediction_scores = self.lm_head(outputs.last_hidden_state)
+            masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), mlm_labels.view(-1))
+
+            if self._current_mlm_step < self.mlm_warmup_steps:
+                loss = (self._current_mlm_step / self.mlm_warmup_steps) * ce_loss
+                loss += (1 - self._current_mlm_step / self.mlm_warmup_steps) * masked_lm_loss
+                self._current_mlm_step += 1
+            else:
+                loss = ce_loss
+        else:
+            loss = ce_loss
+            masked_lm_loss = torch.tensor(0.0)
+
+        return loss, ce_loss, masked_lm_loss, self._current_mlm_step / self.mlm_warmup_steps
+
+
 class RecformerModel(LongformerPreTrainedModel):
     def __init__(self, config: RecformerConfig):
         super().__init__(config)
@@ -670,7 +776,9 @@ class RecformerForPretraining(nn.Module):
 
             if z1_mask is not None and z2_mask is not None:
                 z1_mask_padded = torch.ones(
-                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings), dtype=torch.bool, device=z1_mask.device
+                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings),
+                    dtype=torch.bool,
+                    device=z1_mask.device,
                 )
                 z1_mask_padded[:, :, : z1_mask.size(2)] = z1_mask
 
@@ -817,7 +925,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
-            loss = loss_fct(scores, labels)
+            ce_loss = loss_fct(scores, labels)
 
         else:  ## using sampled softmax
             raise NotImplementedError("Negative sampling disabled")
@@ -832,7 +940,15 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             )
             scores = self.similarity_score(pooler_output, candidates)
             target = torch.zeros_like(labels, device=labels.device)
-            loss = loss_fct(scores, target)
+            ce_loss = loss_fct(scores, target)
+
+        if mlm_input_ids is not None and mlm_labels is not None and self._current_mlm_step < self.mlm_warmup_steps:
+            if self._current_mlm_step < self.mlm_warmup_steps:
+                loss = (self._current_mlm_step / self.mlm_warmup_steps) * ce_loss
+                loss += (1 - self._current_mlm_step / self.mlm_warmup_steps) * masked_lm_loss
+                self._current_mlm_step += 1
+            else:
+                loss = ce_loss
 
         return loss
 
