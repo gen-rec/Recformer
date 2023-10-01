@@ -212,7 +212,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="RecIR",
+        project="WWW-Final",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=path_corpus.name,
