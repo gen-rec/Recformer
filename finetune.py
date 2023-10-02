@@ -215,7 +215,7 @@ def main(args):
         project="WWW-Final",
         entity="gen-rec",
         name=server_random_word_and_date,
-        group=path_corpus.name,
+        group=args.group_name or path_corpus.name,
         config=vars(args),
         tags=[
             path_corpus.name,
