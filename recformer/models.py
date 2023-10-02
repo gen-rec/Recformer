@@ -217,7 +217,7 @@ class RecformerPooler(nn.Module):
         self.pooler_type = config.pooler_type
         self.pad_token_id = config.pad_token_id
 
-        self.linear = nn.Linear(config.hidden_size, 128)
+        self.linear = nn.Linear(config.hidden_size, config.linear_out)
 
     def forward(
         self,
