@@ -233,7 +233,7 @@ def main(args):
         for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
     }
 
-    finetune_data_collator = JointLearningDataCollatorWithPadding(tokenizer, tokenized_items, mlm_ratio=0.2)
+    finetune_data_collator = JointLearningDataCollatorWithPadding(tokenizer, tokenized_items, mlm_ratio=args.mlm_ratio)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
     train_data = RecformerTrainDataset(train, collator=finetune_data_collator)

@@ -402,53 +402,39 @@ class JointLearningDataCollatorWithPadding(FinetuneDataCollatorWithPadding):
         return batch
 
     def mask_mlm(self, batch):
-        masked_input_ids = []
-        masked_labels = []
+        num_items = batch["item_position_ids"].clone()
+        num_items[num_items == 50] = -100
+        num_items = num_items.max(dim=1).values  # (batch_size, )
 
-        input_ids = batch["input_ids"].tolist()
-        token_type_ids = batch["token_type_ids"].tolist()
+        # Mask min(1, num_items * mlm_ratio) items
+        num_mask_items = torch.clamp(torch.round(num_items * self.mlm_ratio), min=1).long()  # (batch_size, )
+        # If num_items == 1, num_mask_items = 0
+        num_mask_items[num_items == 1] = 0
 
-        for batch_idx in range(batch["input_ids"].shape[0]):
-            input_id = input_ids[batch_idx]
-            token_type_id = token_type_ids[batch_idx]
+        # Select item numbers to mask
+        mask_item_nums = [
+            random.sample(range(1, num_item + 1), num_mask_item)
+            for num_item, num_mask_item in zip(num_items.tolist(), num_mask_items.tolist())
+        ]
 
-            while True:
-                masked_items = 0
-                masked_input_id = []
-                masked_label = []
+        # Mask items
+        input_ids_mask = []
+        for i in range(len(num_items)):
+            input_id_mask = torch.zeros(batch["input_ids"].shape[1], dtype=torch.bool)
+            for mask_pos in mask_item_nums[i]:
+                # Mask where batch["item_position_ids"][i] == mask_pos
+                input_id_mask[batch["item_position_ids"][i] == mask_pos] = True
+                # Unmask where batch["token_type_ids"][i] == 1
+                input_id_mask[batch["token_type_ids"][i] == 1] = False
+            input_ids_mask.append(input_id_mask)
 
-                for idx, (input_, token_) in enumerate(zip(input_id, token_type_id)):
-                    is_mask = False
-                    if token_ == 0 or token_ == 3:  # bos token or mask
-                        is_mask = False
-                        masked_input_id.append(input_)
-                    elif token_ == 1:  # item token
-                        is_mask = False
-                        masked_input_id.append(input_)
-                    elif token_ == 2 and token_type_id[idx - 1] == 1:
-                        # mask with mlm_ratio
-                        is_mask = torch.rand(1) < self.mlm_ratio
-                        if is_mask:
-                            masked_items += 1
-                        masked_input_id.append(self.tokenizer.mask_token_id if is_mask else input_)
-                    elif token_ == 2:
-                        masked_input_id.append(self.tokenizer.mask_token_id if is_mask else input_)
-                    else:
-                        raise ValueError(f"Invalid token type id: {token_}")
+        input_ids_mask = torch.stack(input_ids_mask, dim=0)
 
-                    if is_mask:
-                        masked_label.append(input_)
-                    else:
-                        masked_label.append(-100)
+        masked_input_ids = batch["input_ids"].clone()
+        masked_input_ids[input_ids_mask] = self.tokenizer.mask_token_id
 
-                if masked_items > 0:
-                    break
-
-            masked_input_ids.append(masked_input_id)
-            masked_labels.append(masked_label)
-
-        masked_input_ids = torch.tensor(masked_input_ids)
-        masked_labels = torch.tensor(masked_labels)
+        masked_labels = batch["input_ids"].clone()
+        masked_labels[~input_ids_mask] = -100
 
         return masked_input_ids, masked_labels
 
@@ -472,5 +458,3 @@ class JointLearningDataCollatorWithPadding(FinetuneDataCollatorWithPadding):
     #         mask_input_id = input_id.clone()
     #         # Find index of value 1
     #         token_type_id_ones = torch.where(token_type_id == 1)[0]
-
-
