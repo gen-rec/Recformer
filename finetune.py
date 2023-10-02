@@ -181,7 +181,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 def main(args):
     print(args)
 
-    seed_everything(42)
+    seed_everything(args.seed, workers=True)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
