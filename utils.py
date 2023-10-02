@@ -40,6 +40,7 @@ def load_data(args):
 def parse_finetune_args():
     parser = ArgumentParser()
     parser.add_argument("--server", type=str, required=True)
+    parser.add_argument("--seed", type=int, default=42)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
