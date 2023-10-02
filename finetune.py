@@ -12,7 +12,7 @@ from wonderwords import RandomWord
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig, reduce_session
+from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
@@ -114,7 +114,6 @@ def evaluate(model, dataloader, args):
 
         with torch.no_grad():
             scores = model(**batch)  # (bs, |I|, num_attr, items_max)
-            scores = reduce_session(scores, args.session_reduce_method, args.session_reduce_topk)
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
@@ -201,7 +200,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="WWW-Final",
+        project="WWW-Final-Final",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
@@ -212,6 +211,7 @@ def main(args):
             f"reduce_session_{args.session_reduce_method}",
             f"global_attn_{args.global_attention_type}",
             f"linear_{args.linear_out}",
+            f"seed_{args.seed}",
         ],
     )
 

@@ -806,7 +806,14 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
         if labels is None:
-            return self.similarity_score(pooler_output, candidates)
+            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+
+            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+            scores[final_mask] = -torch.inf
+
+            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask)
+            return scores
 
         loss_fct = CrossEntropyLoss()
 
@@ -817,7 +824,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
             scores[final_mask] = -torch.inf
 
-            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)
+            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask)
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
@@ -845,13 +852,13 @@ def reduce_session(
     scores: torch.Tensor,
     session_reduce_method: str,
     session_reduce_topk: int | None = None,
-    session_reduce_weightedsim_temp: float = 1.0,
+    session_reduce_weightedsim_temp: float = 0.05,
+    mask: torch.Tensor | None = None,
 ):
     """
     Mask tensor: True to mask
     """
     scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
-    mask_tensor: torch.Tensor  # (bs, |I|, attr_num, items_max)  # True for valid tokens
 
     if session_reduce_method == "maxsim":
         # Replace NaN with -inf
