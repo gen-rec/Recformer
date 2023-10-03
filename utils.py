@@ -87,6 +87,7 @@ def parse_finetune_args():
     parser.add_argument("--random_word", type=str, default=None)
     parser.add_argument("--zero_shot_only", action="store_true")
     parser.add_argument("--mlm_ratio", type=float, default=0.15)
+    parser.add_argument("--mlm_epochs", type=int, default=1)
     return parser.parse_args()
 
 

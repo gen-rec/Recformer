@@ -246,7 +246,7 @@ def main(args):
         test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
     )
 
-    model = RecformerJointLearning(config, len(train_data) // args.batch_size * 10)
+    model = RecformerJointLearning(config, len(train_data) // args.batch_size * args.mlm_epochs)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
 
     if config.original_embedding:
