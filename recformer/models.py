@@ -400,6 +400,8 @@ class RecformerJointLearning(LongformerPreTrainedModel):
             mlm_labels = mlm_labels.view(-1, mlm_labels.size(-1))
             prediction_scores = self.lm_head(outputs.last_hidden_state)
             masked_lm_loss = loss_fct(prediction_scores.view(-1, self.config.vocab_size), mlm_labels.view(-1))
+            if torch.isnan(masked_lm_loss):
+                masked_lm_loss = torch.tensor(0.0)
 
             if self._current_mlm_step < self.mlm_warmup_steps:
                 loss = (self._current_mlm_step / self.mlm_warmup_steps) * ce_loss
