@@ -375,9 +375,6 @@ class RecformerJointLearning(LongformerPreTrainedModel):
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
-        if labels is None:
-            return self.similarity_score(pooler_output, candidates)
-
         loss_fct = CrossEntropyLoss()
 
         scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
@@ -387,6 +384,9 @@ class RecformerJointLearning(LongformerPreTrainedModel):
         scores[final_mask] = -torch.inf
 
         scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)
+
+        if labels is None:
+            return scores
 
         if labels.dim() == 2:
             labels = labels.squeeze(dim=-1)
