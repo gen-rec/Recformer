@@ -34,6 +34,7 @@ def load_config_tokenizer(args, item2id):
     config.global_attention_type = args.global_attention_type
     config.session_reduce_topk = args.session_reduce_topk
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
+    config.linear_out = args.linear_out
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -220,6 +221,7 @@ def main(args):
             f"pool_{args.pooler_type}",
             f"reduce_session_{args.session_reduce_method}",
             f"global_attn_{args.global_attention_type}",
+            f"linear_{args.linear_out}",
         ],
     )
 

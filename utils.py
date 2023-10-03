@@ -41,6 +41,7 @@ def parse_finetune_args():
     parser = ArgumentParser()
     parser.add_argument("--server", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--linear_out", type=int, default=256)
     parser.add_argument("--group_name", type=str, default=None)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)

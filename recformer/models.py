@@ -217,6 +217,8 @@ class RecformerPooler(nn.Module):
         self.pooler_type = config.pooler_type
         self.pad_token_id = config.pad_token_id
 
+        self.linear = nn.Linear(config.hidden_size, config.linear_out)
+
     def forward(
         self,
         attention_mask: torch.Tensor,
@@ -224,6 +226,8 @@ class RecformerPooler(nn.Module):
         attr_type_ids: torch.Tensor,
         item_position_ids: torch.Tensor,
     ):
+        hidden_states = self.linear.forward(hidden_states)
+
         if self.pooler_type == "attribute":
             attr_max = attr_type_ids.max()
             num_items = item_position_ids.clone()
