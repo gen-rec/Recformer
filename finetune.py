@@ -38,7 +38,7 @@ def load_config_tokenizer(args, item2id):
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
-    if args.global_attention_type not in ["cls", "attribute"]:
+    if args.global_attention_type not in ["cls", "attribute", "item"]:
         raise ValueError("Unknown global attention type.")
 
     if args.session_reduce_method == "weightedsim" and args.session_reduce_weightedsim_temp is None:
