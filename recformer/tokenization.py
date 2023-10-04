@@ -54,7 +54,7 @@ class RecformerTokenizer(LongformerTokenizer):
 
         input_ids = [self.pad_token_id]
         token_type_ids = [-1]  # 1 for key, 2 for value, 0 for padding, -1 for item ID
-        attr_type = [-1]  # 1 for title, 2 for brand, 3 for category, -1 for item ID
+        attr_type = [4]  # 1 for title, 2 for brand, 3 for category, 4 for item ID
         item = list(item.items())[: self.config.max_attr_num]  # truncate attribute number
 
         for attribute in item:
