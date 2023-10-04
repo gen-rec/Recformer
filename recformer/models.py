@@ -316,17 +316,19 @@ class RecformerJointLearning(LongformerPreTrainedModel):
         self.lm_head = LongformerLMHead(config)
         self.sim = Similarity(config)
         self.item_embedding = None
+        self.cls_embedding = None
 
         self.post_init()
 
         self.mlm_warmup_steps = mlm_warmup_steps
         self._current_mlm_step = 0
 
-    def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
-        if embeddings is None:
+    def init_item_embedding(self, item_embedding: Optional[torch.Tensor] = None, cls_embedding: Optional[torch.Tensor] = None):
+        if item_embedding is None or cls_embedding is None:
             raise ValueError("embeddings must be provided.")
 
-        self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
+        self.item_embedding = nn.Parameter(item_embedding, requires_grad=False)
+        self.cls_embedding = nn.Parameter(cls_embedding, requires_grad=False)
 
     def similarity_score(self, pooler_output, candidates=None):
         if candidates is not None:
@@ -376,6 +378,8 @@ class RecformerJointLearning(LongformerPreTrainedModel):
             return_dict=True,
         )
 
+        cls_embedding = outputs.last_hidden_state[:, 0, :]  # (bs, hidden_size)
+
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
@@ -383,11 +387,13 @@ class RecformerJointLearning(LongformerPreTrainedModel):
 
         scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
+        cls_scores = torch.cosine_similarity(cls_embedding.unsqueeze(1), self.cls_embedding.unsqueeze(0), dim=-1)  # (bs, |I|)
+
         all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
         final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
         scores[final_mask] = -torch.inf
 
-        scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)
+        scores = reduce_session(scores, cls_scores, self.config.session_reduce_method, self.config.session_reduce_topk)
 
         if labels is None:
             return scores
@@ -961,6 +967,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
 def reduce_session(
     scores: torch.Tensor,
+    cls_scores: torch.Tensor,
     session_reduce_method: str,
     session_reduce_topk: int | None = None,
     session_reduce_weightedsim_temp: float = 1.0,
@@ -969,6 +976,7 @@ def reduce_session(
     Mask tensor: True to mask
     """
     scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
+    cls_scores: torch.Tensor  # (bs, |I|)
     mask_tensor: torch.Tensor  # (bs, |I|, attr_num, items_max)  # True for valid tokens
 
     if session_reduce_method == "maxsim":
@@ -994,6 +1002,8 @@ def reduce_session(
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     else:
         raise ValueError("Unknown session reduce method.")
+
+    scores = torch.cat((scores, cls_scores.unsqueeze(-1)), dim=-1)  # (bs, |I|, num_attr + 1)
 
     scores = scores.mean(dim=-1)  # (bs, |I|)
     return scores

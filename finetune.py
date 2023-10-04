@@ -64,6 +64,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     items = [ele[1] for ele in items]
 
     item_embeddings = []
+    cls_embeddings = []
 
     with torch.no_grad():
         for i in tqdm(
@@ -90,6 +91,8 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
                     output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
                     item_embeddings.append(output_)
 
+            cls_embeddings.append(outputs.last_hidden_state[:, 0, :].detach())
+
     if args.pooler_type == "token":
         item_embeddings = torch.nn.utils.rnn.pad_sequence(
             item_embeddings, batch_first=True, padding_value=float("nan")
@@ -97,7 +100,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     else:
         item_embeddings = torch.cat(item_embeddings, dim=0)  # (bs, attr_num, 1, hidden_size)
 
-    return item_embeddings
+    return item_embeddings, torch.cat(cls_embeddings, dim=0)
 
 
 def evaluate(model, dataloader, args):
@@ -265,9 +268,8 @@ def main(args):
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
-    model.init_item_embedding(item_embeddings)
+    item_embeddings, cls_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings, cls_embeddings)
 
     model.to(args.device)  # send item embeddings to device
 
@@ -287,8 +289,8 @@ def main(args):
 
     for epoch in range(args.num_train_epochs):
 
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-        model.init_item_embedding(item_embeddings)
+        item_embeddings, cls_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+        model.init_item_embedding(item_embeddings, cls_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
@@ -355,8 +357,8 @@ def main(args):
         if wandb_logger is not None:
             wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-    model.init_item_embedding(item_embeddings)
+    item_embeddings, cls_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings, cls_embeddings)
 
     torch.save(item_embeddings, path_output / "stage_2_item_embeddings.pt")
 
