@@ -77,9 +77,11 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
             for k, v in inputs.items():
+                if k == "item_ids":
+                    continue
                 inputs[k] = torch.LongTensor(v).to(args.device)
 
-            outputs = model(**inputs)
+            outputs = model.forward(**inputs)
 
             if args.pooler_type != "token":
                 item_embeddings.append(outputs.pooler_output.detach())
@@ -109,6 +111,8 @@ def evaluate(model, dataloader, args):
     for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
 
         for k, v in batch.items():
+            if k == "item_ids":
+                continue
             batch[k] = v.to(args.device)
         labels = labels.to(args.device)
 
@@ -144,6 +148,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
     tq = tqdm(dataloader, ncols=100, desc="Training")
     for step, batch in enumerate(tq):
         for k, v in batch.items():
+            if k == "item_ids":
+                continue
             batch[k] = v.to(args.device)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
@@ -229,9 +235,11 @@ def main(args):
         _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
     ]
     tokenized_items = {
-        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
+        item2id[item_id]: [item2id[item_id], input_ids, token_type_ids, attr_type_ids]
         for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
     }
+
+    config.item_size = len(tokenized_items)
 
     finetune_data_collator = JointLearningDataCollatorWithPadding(tokenizer, tokenized_items, mlm_ratio=args.mlm_ratio)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)

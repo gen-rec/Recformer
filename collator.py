@@ -271,6 +271,8 @@ class FinetuneDataCollatorWithPadding:
         batch["labels"] = labels
 
         for k, v in batch.items():
+            if k == "item_ids":
+                continue
             batch[k] = torch.LongTensor(v)
 
         return batch
@@ -300,8 +302,8 @@ class FinetuneDataCollatorWithPadding:
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
+                item_ids, input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
+                feature_seq.append([item_ids, input_ids, token_type_ids, attr_type_ids])
             features.append(feature_seq)
 
         return features
@@ -344,6 +346,8 @@ class EvalDataCollatorWithPadding:
         batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
 
         for k, v in batch.items():
+            if k == "item_ids":
+                continue
             batch[k] = torch.LongTensor(v)
 
         labels = torch.LongTensor(labels)
@@ -372,8 +376,8 @@ class EvalDataCollatorWithPadding:
         for item_seq in batch_item_seq:
             feature_seq = []
             for item in item_seq:
-                input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
-                feature_seq.append([input_ids, token_type_ids, attr_type_ids])
+                item_ids, input_ids, token_type_ids, attr_type_ids = self.tokenized_items[item]
+                feature_seq.append([item_ids, input_ids, token_type_ids, attr_type_ids])
             features.append(feature_seq)
 
         return features

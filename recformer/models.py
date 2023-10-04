@@ -103,6 +103,7 @@ class RecformerEmbeddings(nn.Module):
         else:
             self.token_type_embeddings = nn.Embedding(config.token_type_size, config.hidden_size)
         self.item_position_embeddings = nn.Embedding(config.max_item_embeddings, config.hidden_size)
+        self.item_embeddings = nn.Embedding(config.item_size, config.hidden_size)
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
@@ -124,10 +125,10 @@ class RecformerEmbeddings(nn.Module):
             self.original_embedding = None
 
     def forward(
-        self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
+        self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None, item_ids=None,
     ):
         def original_forward():
-            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
+            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds, item_ids
 
             if position_ids is None:
                 if input_ids is not None:
@@ -141,11 +142,19 @@ class RecformerEmbeddings(nn.Module):
             else:
                 input_shape = inputs_embeds.size()[:-1]
 
-            # Ignore items
+            item_id_mask = torch.eq(token_type_ids, -1)
             token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
 
+            # Ignore items
             if inputs_embeds is None:
                 inputs_embeds = self.word_embeddings(input_ids)
+
+                # Replace
+                for batch_idx in range(input_shape[0]):
+                    item_id_positions = torch.where(item_id_mask[batch_idx])[0].tolist()
+                    for item_id_pos, item_id in zip(item_id_positions, torch.tensor(item_ids[batch_idx], device=input_ids.device)):
+                        inputs_embeds[batch_idx, item_id_pos] = self.item_embeddings(item_id)
+
             position_embeddings = self.position_embeddings(position_ids)
             token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
@@ -155,38 +164,7 @@ class RecformerEmbeddings(nn.Module):
             return embeddings
 
         def recformer_forward():
-            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
-
-            if position_ids is None:
-                if input_ids is not None:
-                    # Create the position ids from the input token ids. Any padded tokens remain padded.
-                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
-                else:
-                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
-
-            if input_ids is not None:
-                input_shape = input_ids.size()
-            else:
-                input_shape = inputs_embeds.size()[:-1]
-
-            seq_length = input_shape[1]
-
-            if position_ids is None:
-                position_ids = self.position_ids[:, :seq_length]
-
-            if token_type_ids is None:
-                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
-
-            if inputs_embeds is None:
-                inputs_embeds = self.word_embeddings(input_ids)
-            position_embeddings = self.position_embeddings(position_ids)
-            item_position_embeddings = self.item_position_embeddings(item_position_ids)
-            token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-            embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
-            embeddings = self.LayerNorm(embeddings)
-            embeddings = self.dropout(embeddings)
-            return embeddings
+            raise NotImplementedError
 
         if self.original_embedding:
             return original_forward()
@@ -356,12 +334,13 @@ class RecformerJointLearning(LongformerPreTrainedModel):
         labels: Optional[torch.Tensor] = None,  # target item ids
         mlm_input_ids: Optional[torch.Tensor] = None,
         mlm_labels: Optional[torch.Tensor] = None,
+        item_ids=None,
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = input_ids.size(0)
 
-        outputs = self.longformer(
+        outputs = self.longformer.forward(
             input_ids,
             attention_mask=attention_mask,
             global_attention_mask=global_attention_mask,
@@ -373,6 +352,7 @@ class RecformerJointLearning(LongformerPreTrainedModel):
             inputs_embeds=inputs_embeds,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
+            item_ids=item_ids,
             return_dict=True,
         )
 
@@ -540,6 +520,7 @@ class RecformerModel(LongformerPreTrainedModel):
         inputs_embeds: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        item_ids: Optional[List[torch.Tensor]] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, RecformerBaseModelOutputWithPooling]:
 
@@ -594,12 +575,13 @@ class RecformerModel(LongformerPreTrainedModel):
             :, 0, 0, :
         ]
 
-        embedding_output = self.embeddings(
+        embedding_output = self.embeddings.forward(
             input_ids=input_ids,
             position_ids=position_ids,
             item_position_ids=item_position_ids,
             token_type_ids=token_type_ids,
             inputs_embeds=inputs_embeds,
+            item_ids=item_ids,
         )
 
         encoder_outputs = self.encoder(
