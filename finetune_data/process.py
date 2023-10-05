@@ -46,7 +46,9 @@ def extract_meta_data(path, attr):
             attr_dict = dict()
             asin = line["asin"]
             category = " ".join(line["category"][::-1])
+            line["category"] = category
             brand = line["brand"]
+            line["brand"] = brand
             title = line["title"]
 
             meta_data[asin] = attr_dict
