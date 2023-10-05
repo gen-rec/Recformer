@@ -33,35 +33,35 @@ parser.add_argument(
     "--meta_file_path", default="meta_Industrial_and_Scientific.json.gz", help="Processing file path (.gz file)."
 )
 parser.add_argument("--output_path", default="Scientific", help="Output directory")
-parser.add_argument("--desc", action="store_true", help="Whether to use description or not.")
+parser.add_argument("--attr", nargs="+")
 args = parser.parse_args()
 
 
-def extract_meta_data(path):
+
+def extract_meta_data(path, attr):
     meta_data = dict()
     with gzip.open(path) as f:
         for line in tqdm(f):
             line = json.loads(line)
             attr_dict = dict()
             asin = line["asin"]
-            category = " ".join(line["category"])
+            category = " ".join(line["category"][::-1])
             brand = line["brand"]
             title = line["title"]
 
             meta_data[asin] = attr_dict
             if len(title) != 0:
-                attr_dict["title"] = title
-                attr_dict["brand"] = brand
-                attr_dict["category"] = category
-                if args.desc:
-                    description = line["description"]
-                    attr_dict["description"] = description
+                for a in attr:
+                    if a in line:
+                        attr_dict[a] = line[a]
+                    else:
+                        attr_dict[a] = ""
                 meta_data[asin] = attr_dict
 
     return meta_data
 
 
-meta_dict = extract_meta_data(args.meta_file_path)
+meta_dict = extract_meta_data(args.meta_file_path, args.attr)
 
 
 output_path = args.output_path
