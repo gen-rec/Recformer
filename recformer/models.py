@@ -3,9 +3,10 @@ from dataclasses import dataclass
 from typing import List, Union, Optional, Tuple
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
+from torch import distributed
 from torch.nn import CrossEntropyLoss
+from torch.nn.functional import cross_entropy
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
     LongformerPreTrainedModel,
@@ -63,6 +64,11 @@ class RecformerPretrainingOutput:
     global_attentions: Optional[Tuple[torch.FloatTensor]] = None
 
 
+@dataclass
+class RecformerBaseModelOutputWithPooling(LongformerBaseModelOutputWithPooling):
+    mask: Optional[torch.Tensor] = None
+
+
 def create_position_ids_from_input_ids(input_ids, padding_idx):
     """
     Replace non-padding symbols with their position numbers. Position numbers begin at padding_idx+1. Padding symbols
@@ -103,7 +109,10 @@ class RecformerEmbeddings(nn.Module):
             config.max_position_embeddings, config.hidden_size, padding_idx=self.padding_idx
         )
 
-        self.original_embedding = config.original_embedding
+        try:
+            self.original_embedding = config.original_embedding
+        except AttributeError:
+            self.original_embedding = None
 
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
@@ -205,40 +214,41 @@ class RecformerPooler(nn.Module):
         hidden_states: torch.Tensor,
         attr_type_ids: torch.Tensor,
         item_position_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    ):
         if self.pooler_type == "attribute":
-            # attention_mask: (bs, seq_len)
-            # hidden_states: (bs, seq_len, hidden_size)
-            # attr_type_ids: (bs, seq_len)
             attr_max = attr_type_ids.max()
-
             num_items = item_position_ids.clone()
             num_items[num_items == 50] = -100
-            num_items = torch.max(num_items, dim=1).values  # (bs, )
+            num_items = torch.max(num_items, dim=1).values
             items_max = num_items.max()
 
-            # Create boolean masks for attribute and item
-            # attr_mask  (bs, attr_num, seq_len)
-            # item_mask  (bs, item_num, seq_len)
-            # attr_item_mask  (bs, attr_num, items_max, seq_len)
             attr_mask = torch.eq(
                 attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
             )  # (bs, attr_num, seq_len)
             item_mask = torch.eq(
                 item_position_ids.unsqueeze(1),
                 torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
-            )  # (bs, item_num, seq_len)
-            attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))
+            )
+            attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))  # Ignore tokens that are False
 
-            # Select hidden_state for each item and each attribute
-            # Vectorized implementation
-            # attr_item_mask  (bs, attr_num, items_max, seq_len)  Boolean mask
-            # hidden_states  (bs, seq_len, hidden_size)
-            # hidden_states_pooled  (bs, attr_num, items_max, hidden_size)
             hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
-            hidden_states_pooled[~attr_item_mask] = torch.nan
-            # (bs, attr_num, items_max, seq_len, hidden_size)
-            hidden_states_pooled = hidden_states_pooled.nanmean(dim=3)  # (bs, attr_num, items_max, hidden_size)
+
+            # Sum across the required dimension
+            summed_states = torch.sum(hidden_states_pooled, dim=3)  # Sum across the sequence length dimension
+
+            # Count the number of valid (not masked out) elements in the attr_item_mask for each position
+            valid_counts = attr_item_mask.sum(dim=3)
+            valid_counts.unsqueeze_(-1)  # Adding an extra dimension to match the dimensionality for division
+
+            valid_counts_eq_0 = torch.eq(valid_counts, 0)
+
+            # Avoid division by zero by replacing 0 counts with 1
+            valid_counts = torch.where(valid_counts_eq_0, torch.ones_like(valid_counts), valid_counts)
+
+            # Compute the mean
+            hidden_states_pooled = summed_states / valid_counts  # (bs, attr_num, items_max, hidden_size)
+
+            return hidden_states_pooled, valid_counts_eq_0.squeeze(-1)
 
         elif self.pooler_type == "item":
             num_items = item_position_ids.clone()
@@ -246,20 +256,24 @@ class RecformerPooler(nn.Module):
             num_items = torch.max(num_items, dim=1).values  # (bs, )
             items_max = num_items.max()
 
-            # item_mask  (bs, item_num, seq_len)
             item_mask = torch.eq(
                 item_position_ids.unsqueeze(1),
                 torch.arange(1, items_max + 1, device=item_position_ids.device).reshape(1, -1, 1),
             )  # (bs, item_num, seq_len)
 
-            # hidden_states  (bs, seq_len, hidden_size)
-            # hidden_states_pooled  (bs, items_max, hidden_size)
             hidden_states_pooled = hidden_states.unsqueeze(1) * item_mask.unsqueeze(
                 -1
             )  # (bs, item_num, seq_len, hidden_size)
-            hidden_states_pooled[~item_mask] = torch.nan  # (bs, items_max, seq_len, hidden_size)
-            hidden_states_pooled = hidden_states_pooled.nanmean(dim=2)  # (bs, items_max, hidden_size)
+
+            # Instead of using NaNs, use 0s and then use the mask to compute the mean
+            num_values = item_mask.sum(dim=2).unsqueeze(-1)  # Count of True values for the mean along seq_len dimension
+            sum_hidden_states = hidden_states_pooled.sum(dim=2)  # Sum along the seq_len dimension
+            hidden_states_pooled = torch.where(
+                num_values > 0, sum_hidden_states / num_values, torch.zeros_like(sum_hidden_states)
+            )
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, items_max, hidden_size)
+
+            return hidden_states_pooled, item_mask
 
         elif self.pooler_type == "token":
             seq_len = hidden_states.shape[1]
@@ -269,14 +283,16 @@ class RecformerPooler(nn.Module):
             hidden_states_pooled[~mask] = torch.nan  # (bs, seq_len, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, seq_len, hidden_size)
 
+            return hidden_states_pooled, mask
+
         elif self.pooler_type == "cls":
             hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1).unsqueeze(1)  # (bs, 1, 1, hidden_size)
 
+            return hidden_states_pooled, None
+
         else:
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")
-
-        return hidden_states_pooled
 
 
 class RecformerModel(LongformerPreTrainedModel):
@@ -297,9 +313,6 @@ class RecformerModel(LongformerPreTrainedModel):
         self.embeddings = RecformerEmbeddings(config)
         self.encoder = LongformerEncoder(config)
         self.pooler = RecformerPooler(config)
-
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
@@ -407,7 +420,7 @@ class RecformerModel(LongformerPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, LongformerBaseModelOutputWithPooling]:
+    ) -> Union[Tuple, RecformerBaseModelOutputWithPooling]:
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -478,8 +491,8 @@ class RecformerModel(LongformerPreTrainedModel):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-        pooled_output = (
-            self.pooler(
+        pooled_output, mask = (
+            self.pooler.forward(
                 attention_mask=attention_mask,
                 hidden_states=sequence_output,
                 attr_type_ids=attr_type_ids,
@@ -492,12 +505,13 @@ class RecformerModel(LongformerPreTrainedModel):
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
 
-        return LongformerBaseModelOutputWithPooling(
+        return RecformerBaseModelOutputWithPooling(
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
             global_attentions=encoder_outputs.global_attentions,
+            mask=mask,
         )
 
 
@@ -515,15 +529,14 @@ class Similarity(nn.Module):
         return self.cos(x, y) / self.temp
 
 
-class RecformerForPretraining(LongformerPreTrainedModel):
+class RecformerForPretraining(nn.Module):
     def __init__(self, config: RecformerConfig):
-        super().__init__(config)
+        super().__init__()
 
+        self.config = config
         self.longformer = RecformerModel(config)
         self.lm_head = LongformerLMHead(config)
         self.sim = Similarity(config)
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def forward(
         self,
@@ -546,17 +559,12 @@ class RecformerForPretraining(LongformerPreTrainedModel):
         head_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
     ):
-
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         batch_size = input_ids_a.size(0)
 
-        outputs_a = self.longformer(
+        outputs_a = self.longformer.forward(
             input_ids_a,
             attention_mask=attention_mask_a,
             global_attention_mask=global_attention_mask_a,
@@ -570,7 +578,7 @@ class RecformerForPretraining(LongformerPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=True,
         )
-        outputs_b = self.longformer(
+        outputs_b = self.longformer.forward(
             input_ids_b,
             attention_mask=attention_mask_b,
             global_attention_mask=global_attention_mask_b,
@@ -588,7 +596,7 @@ class RecformerForPretraining(LongformerPreTrainedModel):
         # MLM auxiliary objective
         mlm_outputs_a = None
         if mlm_input_ids_a is not None:
-            mlm_outputs_a = self.longformer(
+            mlm_outputs_a = self.longformer.forward(
                 mlm_input_ids_a,
                 attention_mask=attention_mask_a,
                 global_attention_mask=global_attention_mask_a,
@@ -605,7 +613,7 @@ class RecformerForPretraining(LongformerPreTrainedModel):
 
         mlm_outputs_b = None
         if mlm_input_ids_b is not None:
-            mlm_outputs_b = self.longformer(
+            mlm_outputs_b = self.longformer.forward(
                 mlm_input_ids_b,
                 attention_mask=attention_mask_b,
                 global_attention_mask=global_attention_mask_b,
@@ -620,45 +628,93 @@ class RecformerForPretraining(LongformerPreTrainedModel):
                 return_dict=True,
             )
 
-        z1 = outputs_a.pooler_output  # (bs*num_sent, hidden_size)
-        z2 = outputs_b.pooler_output  # (bs*num_sent, hidden_size)
+        z1 = outputs_a.pooler_output  # (bs, attr_num, session_max, hidden_size)
+        z2 = outputs_b.pooler_output  # (bs, attr_num, 1, hidden_size)
+
+        z1_mask = outputs_a.mask  # (bs, attr_num, session_max)
+        z2_mask = outputs_b.mask  # (bs, attr_num, 1)
 
         # Gather all embeddings if using distributed training
-        if dist.is_initialized() and self.training:
+        if self.training and distributed.is_initialized():
+            # Pad z1 to (bs, attr_num, max_item_embeddings, hidden_size)
+            z1_padded = torch.empty(
+                (batch_size, z1.size(1), self.config.max_item_embeddings, z1.size(3)), device=z1.device
+            )
+            z1_padded[:, :, : z1.size(2), :] = z1
 
             # Dummy vectors for allgather
-            z1_list = [torch.zeros_like(z1) for _ in range(dist.get_world_size())]
-            z2_list = [torch.zeros_like(z2) for _ in range(dist.get_world_size())]
+            z1_list = [torch.empty_like(z1_padded) for _ in range(distributed.get_world_size())]
+            z2_list = [torch.empty_like(z2) for _ in range(distributed.get_world_size())]
+
             # Allgather
-            dist.all_gather(tensor_list=z1_list, tensor=z1.contiguous())
-            dist.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
+            distributed.all_gather(tensor_list=z1_list, tensor=z1_padded.contiguous())
+            distributed.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
 
             # Since allgather results do not have gradients, we replace the
             # current process's corresponding embeddings with original tensors
-            z1_list[dist.get_rank()] = z1
-            z2_list[dist.get_rank()] = z2
+            z1_list[distributed.get_rank()] = z1_padded
+            z2_list[distributed.get_rank()] = z2
+
             # Get full batch embeddings: (bs x N, hidden)
             z1 = torch.cat(z1_list, 0)
             z2 = torch.cat(z2_list, 0)
 
-        cos_sim = self.sim(z1.unsqueeze(1), z2.unsqueeze(0))
-        labels = torch.arange(cos_sim.size(0)).long().to(cos_sim.device)
+            if z1_mask is not None and z2_mask is not None:
+                z1_mask_padded = torch.ones(
+                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings), dtype=torch.bool, device=z1_mask.device
+                )
+                z1_mask_padded[:, :, : z1_mask.size(2)] = z1_mask
 
-        loss_fct = CrossEntropyLoss()
-        loss = loss_fct(cos_sim, labels)
-        correct_num = (torch.argmax(cos_sim, 1) == labels).sum()
+                z1_mask_list = [torch.empty_like(z1_mask_padded) for _ in range(distributed.get_world_size())]
+                z2_mask_list = [torch.empty_like(z2_mask) for _ in range(distributed.get_world_size())]
+
+                distributed.all_gather(tensor_list=z1_mask_list, tensor=z1_mask_padded.contiguous())
+                distributed.all_gather(tensor_list=z2_mask_list, tensor=z2_mask.contiguous())
+
+                z1_mask = torch.cat(z1_mask_list, 0)
+                z2_mask = torch.cat(z2_mask_list, 0)
+
+        # z1: (bs, attr_num, items_max, hidden_size)
+        # z2: (bs, attr_num, 1, hidden_size)
+        # z1_mask: (bs, attr_num, items_max)
+        # z2_mask: (bs, attr_num, 1)
+        z1.unsqueeze_(1)  # (bs, 1, attr_num, items_max, hidden_size)
+        z2.unsqueeze_(0)  # (1, bs, attr_num, 1, hidden_size)
+        z1_mask.unsqueeze_(1)  # (bs, 1, attr_num, items_max)
+        z2_mask.unsqueeze_(0)  # (1, bs, attr_num, 1)
+
+        scores = self.sim.forward(z1, z2)  # (bs, bs, attr_num, items_max)
+
+        mask = torch.add(z1_mask, z2_mask)  # (bs, bs, attr_num, items_max)
+        scores[mask] = -torch.inf
+
+        cos_sim = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)  # (bs, bs)
+        labels = torch.arange(cos_sim.size(0), device=cos_sim.device)
+
+        ce_loss = cross_entropy(cos_sim, labels)
+        correct_num = torch.eq(torch.argmax(cos_sim, 1), labels).sum()
 
         if mlm_outputs_a is not None and mlm_labels_a is not None:
             mlm_labels_a = mlm_labels_a.view(-1, mlm_labels_a.size(-1))
             prediction_scores_a = self.lm_head(mlm_outputs_a.last_hidden_state)
-            masked_lm_loss_a = loss_fct(prediction_scores_a.view(-1, self.config.vocab_size), mlm_labels_a.view(-1))
-            loss = loss + self.config.mlm_weight * masked_lm_loss_a
+            masked_lm_loss_a = cross_entropy(
+                prediction_scores_a.view(-1, self.config.vocab_size), mlm_labels_a.view(-1)
+            )
+            mlm_loss_a = self.config.mlm_weight * masked_lm_loss_a
+        else:
+            mlm_loss_a = 0
 
         if mlm_outputs_b is not None and mlm_labels_b is not None:
             mlm_labels_b = mlm_labels_b.view(-1, mlm_labels_b.size(-1))
             prediction_scores_b = self.lm_head(mlm_outputs_b.last_hidden_state)
-            masked_lm_loss_b = loss_fct(prediction_scores_b.view(-1, self.config.vocab_size), mlm_labels_b.view(-1))
-            loss = loss + self.config.mlm_weight * masked_lm_loss_b
+            masked_lm_loss_b = cross_entropy(
+                prediction_scores_b.view(-1, self.config.vocab_size), mlm_labels_b.view(-1)
+            )
+            mlm_loss_b = self.config.mlm_weight * masked_lm_loss_b
+        else:
+            mlm_loss_b = 0
+
+        loss = ce_loss + mlm_loss_a + mlm_loss_b
 
         return RecformerPretrainingOutput(
             loss=loss,
@@ -678,20 +734,20 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.longformer = RecformerModel(config)
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
+        self.item_embedding = None
         self.post_init()
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
 
-        self.item_embedding = embeddings.clone()
-        self.item_embedding.requires_grad = False
+        self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
 
     def similarity_score(self, pooler_output, candidates=None):
         if candidates is not None:
             raise NotImplementedError("Negative sampling disabled")
 
-        candidate_embeddings = self.item_embedding
+        candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
         pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
         sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
 
@@ -733,7 +789,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             return_dict=True,
         )
 
-        pooler_output = outputs.pooler_output  # (bs, hidden_size)
+        pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
+        pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
         if labels is None:
             return self.similarity_score(pooler_output, candidates)
@@ -742,6 +799,11 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+
+            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+            scores[final_mask] = -torch.inf
+
             scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)
 
             if labels.dim() == 2:
@@ -772,21 +834,27 @@ def reduce_session(
     session_reduce_topk: int | None = None,
     session_reduce_weightedsim_temp: float = 1.0,
 ):
+    """
+    Mask tensor: True to mask
+    """
     scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
+    mask_tensor: torch.Tensor  # (bs, |I|, attr_num, items_max)  # True for valid tokens
 
     if session_reduce_method == "maxsim":
         # Replace NaN with -inf
-        scores[torch.isnan(scores)] = -torch.inf  # (bs, |I|, attr_num, items_max)
         scores = scores.max(dim=-1).values  # (bs, |I|, num_attr)
     elif session_reduce_method == "mean":
+        raise NotImplementedError("Mean pooling disabled")
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     elif session_reduce_method == "weightedsim":
+        raise NotImplementedError("Weighted pooling disabled")
         scores[torch.isnan(scores)] = -torch.inf
         scores = scores / session_reduce_weightedsim_temp  # (bs, |I|, num_attr, items_max)
         weights = torch.softmax(scores, dim=-1)  # (bs, |I|, num_attr, items_max)
         scores = torch.mul(scores, weights)  # (bs, |I|, num_attr, items_max)
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     elif session_reduce_method == "topksim":
+        raise NotImplementedError("Topk pooling disabled")
         session_reduce_topk = min(session_reduce_topk, scores.shape[-1])
         scores[torch.isnan(scores)] = -torch.inf
         scores = scores.topk(session_reduce_topk, dim=-1).values  # (bs, |I|, num_attr, topk)

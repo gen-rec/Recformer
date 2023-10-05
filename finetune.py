@@ -103,6 +103,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
 
 def evaluate(model, dataloader, args, path_output):
+
     model.eval()
 
     evaluation_results = []
@@ -218,8 +219,6 @@ def main(args):
         ],
     )
 
-    path_ckpt = path_output / args.ckpt
-
     doc_tuples = [
         _par_tokenize_doc(doc, tokenizer) for doc in
         tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
@@ -254,9 +253,9 @@ def main(args):
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
-    model.init_item_embedding(item_embeddings)
+    # item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    #
+    # model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
 
@@ -267,6 +266,7 @@ def main(args):
     if wandb_logger is not None:
         wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
     print(f"Test set Zero-shot: {test_metrics}")
+
 
     best_target = float("-inf")
     patient = 5
@@ -289,22 +289,22 @@ def main(args):
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
                 patient = 5
-                torch.save(model.state_dict(), path_ckpt)
+                torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
             else:
                 patient -= 1
                 if patient == 0:
                     break
 
-    test_metrics = eval(model, test_loader, args)
+    print("Load best model in stage 1.")
+    model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
+
+    test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
     if wandb_logger is not None:
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
 
     if not args.one_step_training:
-        print("Load best model in stage 1.")
-        model.load_state_dict(torch.load(path_ckpt))
-
         patient = 3
 
         for epoch in range(args.num_train_epochs):
@@ -325,24 +325,31 @@ def main(args):
                     torch.save(model.state_dict(), path_ckpt)
                     config.save_pretrained(path_output)
 
+
                 else:
                     patient -= 1
                     if patient == 0:
                         break
 
-    print("Test with the best checkpoint.")
-    model.load_state_dict(torch.load(path_ckpt))
-    test_metrics = eval(model, test_loader, args)
-    print(f"Stage-2 Test set: {test_metrics}")
+        print("Load best model in stage 2.")
+        try:
+            model.load_state_dict(torch.load(path_output / "stage_2_best.pt"))
+        except FileNotFoundError:
+            print("No best model in stage 2. Use the latest model.")
 
-    if wandb_logger is not None:
-        wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
+        test_metrics = evaluate(model, test_loader, args)
+        print(f"Stage-2 Test set: {test_metrics}")
+
+        if wandb_logger is not None:
+            wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
 
     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
     model.init_item_embedding(item_embeddings)
 
+    torch.save(item_embeddings, path_output / "stage_2_item_embeddings.pt")
+
     print("Test with the best checkpoint and the latest item embeddings.")
-    test_metrics = eval(model, test_loader, args)
+    test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-2 Test set: {test_metrics}")
 
     if wandb_logger is not None:
