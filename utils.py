@@ -66,7 +66,7 @@ def parse_finetune_args():
     parser.add_argument("--num_train_epochs", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)
-    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
+    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 20, 50], help="ks for Metric@k")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=0)
