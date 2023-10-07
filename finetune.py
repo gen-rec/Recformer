@@ -12,6 +12,7 @@ from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from wonderwords import RandomWord
+import numpy as np
 
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
@@ -220,7 +221,7 @@ def main():
     if args.data_percent < 1.0:
         filtered_user = []
         for user in train.keys():
-            if random.randint(1, 1/args.data_percent) == 1:
+            if random.random() < args.data_percent:
                 filtered_user.append(user)
 
         print(f"Filter {len(filtered_user)} users from {len(train)} users.")
