@@ -350,7 +350,7 @@ def main():
                     break
 
     print("Load best model in stage 1.")
-    model.load_state_dict(torch.load(path_ckpt))
+    model.load_state_dict(torch.load(path_output / "stage_1_best_model.pt"))
 
     test_metrics = eval(model, test_loader, args)
     print(f"Test set: {test_metrics}")
