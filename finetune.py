@@ -170,6 +170,7 @@ def main():
     # experiment
     parser.add_argument("--data_percent", type=float, default=1.0)
     parser.add_argument("--group_name", type=str)
+    parser.add_argument("--seed", type=int, default=42)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=str, default=None, required=True)
@@ -205,12 +206,13 @@ def main():
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
 
+
     torch.set_float32_matmul_precision("medium")
 
     args = parser.parse_args()
     print(args)
 
-    seed_everything(42)
+    seed_everything(args.seed)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
