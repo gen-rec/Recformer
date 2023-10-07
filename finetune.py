@@ -1,3 +1,5 @@
+import json
+import random
 from datetime import datetime
 from pathlib import Path
 from random import randint
@@ -176,21 +178,14 @@ def main(args):
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
 
     if args.data_percent < 1.0:
-        filtered_user = []
-        for user in train.keys():
-            if randint(1, 1/args.data_percent) == 1:
-                filtered_user.append(user)
-
-        print(f"Total users: {len(train)}")
-        print(f"Filtered users: {len(filtered_user)}")
-        print(f"Filtered ratio: {len(filtered_user) / len(train):.4f} | {args.data_percent}")
-
+        filtered_user = json.load(open(args.data_path / f"filtered_user_{args.data_percent}.json"))
         filtered_train = {k: v for k, v in train.items() if k in filtered_user}
         filtered_val = {k: v for k, v in val.items() if k in filtered_user}
 
-        print(f"Filtered train: {len(filtered_train)}")
-        print(f"Filtered val: {len(filtered_val)}")
-        print(f"Filtered test: {len(test)}")
+        print(f"Filtered train size: {len(filtered_train)}")
+        print(f"Filtered val size: {len(filtered_val)}")
+
+
 
     else:
         filtered_train = train
@@ -252,6 +247,10 @@ def main(args):
     train_data = RecformerTrainDataset(filtered_train, collator=finetune_data_collator)
     val_data = RecformerEvalDataset(train, filtered_val, test, mode="val", collator=eval_data_collator)
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
+
+    print(f"Train size: {len(train_data)}")
+    print(f"Val size: {len(val_data)}")
+    print(f"Test size: {len(test_data)}")
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
     dev_loader = DataLoader(
