@@ -33,7 +33,8 @@ parser.add_argument(
     "--meta_file_path", default="meta_Industrial_and_Scientific.json.gz", help="Processing file path (.gz file)."
 )
 parser.add_argument("--output_path", default="Scientific", help="Output directory")
-parser.add_argument("--attr",nargs="+", default=["title", "brand", "category"], help="Output directory")
+parser.add_argument("--attr", nargs="+", default=["title", "brand", "category"], help="Output directory")
+parser.add_argument("--percent", type=float, default=1, help="Output directory")
 args = parser.parse_args()
 
 
@@ -50,6 +51,8 @@ def extract_meta_data(path):
                 for a in args.attr:
                     if a == 'category':
                         attr_dict[a] = " ".join(line["category"])
+                    elif a == 'description':
+                        attr_dict[a] = line.get(a, "")[0] if len(line.get(a, "")) != 0 else ""
                     else:
                         attr_dict[a] = line.get(a, "")
 
@@ -61,7 +64,7 @@ def extract_meta_data(path):
 meta_dict = extract_meta_data(args.meta_file_path)
 
 
-output_path = args.output_path
+output_path = args.output_path + "_" + str(args.percent)
 if not os.path.exists(output_path):
     os.mkdir(output_path)
 
@@ -108,14 +111,19 @@ for k, v in tqdm(sequences.items()):
 
     length = len(sequences[k])
     intersections += length
-    if length < 4:
-        train_dict[k] = sequences[k]
-    else:
-        train_dict[k] = sequences[k][: length - 2]
-        dev_dict[k] = [sequences[k][length - 2]]
-        test_dict[k] = [sequences[k][length - 1]]
+
+    rand = random.randint(1, 1/args.percent)
+    if rand == 1:
+        if length < 4:
+            train_dict[k] = sequences[k]
+        else:
+            train_dict[k] = sequences[k][: length - 2]
+            dev_dict[k] = [sequences[k][length - 2]]
+            test_dict[k] = [sequences[k][length - 1]]
 
 print(f"Users: {len(user_field.label2id)}, Items: {len(s_field.label2id)}, Intersects: {intersections}")
+print(f"Train: {len(train_dict)}, Dev: {len(dev_dict)}, Test: {len(test_dict)}")
+print(f"Created {args.percent} percent of the data")
 
 f_u = open(umap_file, "w", encoding="utf8")
 json.dump(user_field.label2id, f_u, indent=1, ensure_ascii=False)

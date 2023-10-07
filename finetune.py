@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from random import randint
 
 import torch
 import wandb
@@ -173,6 +174,28 @@ def main(args):
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
+
+    if args.data_percent < 1.0:
+        filtered_user = []
+        for user in train.keys():
+            if randint(1, 1/args.data_percent) == 1:
+                filtered_user.append(user)
+
+        print(f"Total users: {len(train)}")
+        print(f"Filtered users: {len(filtered_user)}")
+        print(f"Filtered ratio: {len(filtered_user) / len(train):.4f} | {args.data_percent}")
+
+        filtered_train = {k: v for k, v in train.items() if k in filtered_user}
+        filtered_val = {k: v for k, v in val.items() if k in filtered_user}
+
+        print(f"Filtered train: {len(filtered_train)}")
+        print(f"Filtered val: {len(filtered_val)}")
+        print(f"Filtered test: {len(test)}")
+
+    else:
+        filtered_train = train
+        filtered_val = val
+
     config, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
@@ -226,8 +249,8 @@ def main(args):
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
-    train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
-    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
+    train_data = RecformerTrainDataset(filtered_train, collator=finetune_data_collator)
+    val_data = RecformerEvalDataset(train, filtered_val, test, mode="val", collator=eval_data_collator)
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)

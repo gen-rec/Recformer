@@ -54,6 +54,7 @@ def parse_finetune_args():
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
     # data process
+    parser.add_argument("--data_percent", type=float, default=1.0)
     parser.add_argument(
         "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
     )
