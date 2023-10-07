@@ -219,23 +219,15 @@ def main():
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
 
     if args.data_percent < 1.0:
-        filtered_user = []
-        for user in train.keys():
-            if random.random() < args.data_percent:
-                filtered_user.append(user)
-
-        print(f"Filter {len(filtered_user)} users from {len(train)} users.")
-        print(f"Filtered proportion: {len(filtered_user) / len(train):.4f} | {args.data_percent:.4f}")
+        filtered_user = json.load(open(args.data_path / f"filtered_user_{args.data_percent}.json"))
         filtered_train = {k: v for k, v in train.items() if k in filtered_user}
         filtered_val = {k: v for k, v in val.items() if k in filtered_user}
+
         print(f"Filtered train size: {len(filtered_train)}")
         print(f"Filtered val size: {len(filtered_val)}")
-        print(f"Filtered test size: {len(test)}")
     else:
         filtered_train = train
         filtered_val = val
-
-
 
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
     config.max_attr_num = 3
@@ -290,6 +282,10 @@ def main():
     train_data = RecformerTrainDataset(filtered_train, collator=finetune_data_collator)
     val_data = RecformerEvalDataset(train, filtered_val, test, mode="val", collator=eval_data_collator)
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
+
+    print(f"Train size: {len(train_data)}")
+    print(f"Val size: {len(val_data)}")
+    print(f"Test size: {len(test_data)}")
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
     dev_loader = DataLoader(val_data, batch_size=args.batch_size, collate_fn=val_data.collate_fn)
