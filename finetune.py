@@ -1,3 +1,4 @@
+import random
 import json
 import os
 from argparse import ArgumentParser
@@ -166,6 +167,9 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, train
 
 def main():
     parser = ArgumentParser()
+    # experiment
+    parser.add_argument("--data_percent", type=float, default=1.0)
+    parser.add_argument("--group_name", type=str)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=str, default=None, required=True)
@@ -211,6 +215,25 @@ def main():
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
 
+    if args.data_percent < 1.0:
+        filtered_user = []
+        for user in train.keys():
+            if random.randint(1, 1/args.data_percent) == 1:
+                filtered_user.append(user)
+
+        print(f"Filter {len(filtered_user)} users from {len(train)} users.")
+        print(f"Filtered proportion: {len(filtered_user) / len(train):.4f} | {args.data_percent:.4f}")
+        filtered_train = {k: v for k, v in train.items() if k in filtered_user}
+        filtered_val = {k: v for k, v in val.items() if k in filtered_user}
+        print(f"Filtered train size: {len(filtered_train)}")
+        print(f"Filtered val size: {len(filtered_val)}")
+        print(f"Filtered test size: {len(test)}")
+    else:
+        filtered_train = train
+        filtered_val = val
+
+
+
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
     config.max_attr_num = 3
     config.max_attr_length = 32
@@ -241,7 +264,7 @@ def main():
         project="Baseline-Recformer",
         entity="gen-rec",
         name=random_word_and_date,
-        group=path_corpus.name,
+        group=path_corpus.name if args.group_name is None else args.group_name,
         config=vars(args),
         tags=[
             path_corpus.name,
@@ -261,8 +284,8 @@ def main():
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
-    train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
-    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
+    train_data = RecformerTrainDataset(filtered_train, collator=finetune_data_collator)
+    val_data = RecformerEvalDataset(train, filtered_val, test, mode="val", collator=eval_data_collator)
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
