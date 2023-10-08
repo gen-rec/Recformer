@@ -219,7 +219,7 @@ def main():
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
 
     if args.data_percent < 1.0:
-        filtered_user = json.load(open(args.data_path / f"filtered_user_{args.data_percent}.json"))
+        filtered_user = json.load(open(Path(args.data_path) / f"filtered_user_{args.data_percent}.json"))
         filtered_train = {k: v for k, v in train.items() if k in filtered_user}
         filtered_val = {k: v for k, v in val.items() if k in filtered_user}
 
