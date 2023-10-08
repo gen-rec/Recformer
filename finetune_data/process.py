@@ -2,7 +2,6 @@ import argparse
 import gzip
 import json
 import os
-import random
 from collections import defaultdict
 
 from tqdm import tqdm
@@ -103,6 +102,14 @@ intersections = 0
 for k, v in tqdm(sequences.items()):
     sequences[k] = sorted(v, key=lambda x: x[1])
     sequences[k] = [ele[0] for ele in sequences[k]]
+
+    # Dedup with order reserved
+    dedup = []
+    for ele in sequences[k]:
+        if ele not in dedup:
+            dedup.append(ele)
+
+    sequences[k] = dedup
 
     length = len(sequences[k])
     intersections += length
