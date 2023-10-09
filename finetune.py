@@ -1,3 +1,5 @@
+import json
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +19,8 @@ from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
+
+SERVER_URL = "http://115.145.135.66:8000"
 
 
 def load_config_tokenizer(args, item2id):
@@ -100,11 +104,14 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     return item_embeddings
 
 
-def evaluate(model, dataloader, args):
+def evaluate(model, dataloader, args, return_preds=False):
     model.eval()
 
     ranker = Ranker(args.metric_ks)
     average_meter_set = AverageMeterSet()
+
+    all_scores = []
+    all_labels = []
 
     for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
 
@@ -114,6 +121,9 @@ def evaluate(model, dataloader, args):
 
         with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=args.bf16):
             scores = model(**batch)  # (bs, |I|, num_attr, items_max)
+
+        all_scores.append(scores.detach().clone().cpu())
+        all_labels.append(labels.detach().clone().cpu())
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
@@ -130,6 +140,12 @@ def evaluate(model, dataloader, args):
             average_meter_set.update(k, v)
 
     average_metrics = average_meter_set.averages()
+
+    if return_preds:
+        all_scores = torch.cat(all_scores, dim=0)
+        all_labels = torch.cat(all_labels, dim=0).squeeze()
+        all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
+        return average_metrics, all_predictions, all_labels
 
     return average_metrics
 
@@ -172,7 +188,7 @@ def main(args):
     seed_everything(args.seed, workers=True)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
-    train, val, test, item_meta_dict, item2id, id2item = load_data(args)
+    train, val, test, item_meta_dict, item2id, id2item, user2id, id2user = load_data(args)
     config, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
@@ -332,23 +348,40 @@ def main(args):
         except FileNotFoundError:
             print("No best model in stage 2. Use the latest model.")
 
-        test_metrics = evaluate(model, test_loader, args)
+        test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
         print(f"Stage-2 Test set: {test_metrics}")
 
         if wandb_logger is not None:
             wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-    model.init_item_embedding(item_embeddings)
+        users = list(map(int, test.keys()))
+        users = list(map(id2user.get, users))
 
-    torch.save(item_embeddings, path_output / "stage_2_item_embeddings.pt")
+        predictions = predictions.tolist()
+        labels = labels.tolist()
 
-    print("Test with the best checkpoint and the latest item embeddings.")
-    test_metrics = evaluate(model, test_loader, args)
-    print(f"Stage-2 Test set: {test_metrics}")
+        output = {}
+        for user, prediction, label in zip(users, predictions, labels):
+            prediction = list(map(id2item.get, prediction))
+            label = id2item[label]
+            output[user] = {"predictions": prediction, "target": label}
 
-    if wandb_logger is not None:
-        wandb_logger.log({f"test/{k}": v for k, v in test_metrics.items()})
+        json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
+
+        # Send to http
+        send_http(args, output)
+
+
+def send_http(args, output):
+    import requests
+    data = json.dumps(output).encode("utf-8")
+    file_name = f"MARS_{args.data_path[args.data_path.rfind(os.sep) + 1:]}_{args.seed}.json"
+    headers = {"Content-Type": "application/json", "File-Name": file_name}
+    response = requests.post(SERVER_URL, data=data, headers=headers)
+    if response.status_code == 200:
+        print("Send to server successfully.")
+    else:
+        print("Send to server failed.")
 
 
 if __name__ == "__main__":
