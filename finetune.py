@@ -112,7 +112,7 @@ def evaluate(model, dataloader, args):
             batch[k] = v.to(args.device)
         labels = labels.to(args.device)
 
-        with torch.no_grad():
+        with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=args.bf16):
             scores = model(**batch)  # (bs, |I|, num_attr, items_max)
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
