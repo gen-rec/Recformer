@@ -266,8 +266,6 @@ def main():
         ],
     )
 
-    path_ckpt = path_output / args.ckpt
-
     doc_tuples = [
         _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
     ]
