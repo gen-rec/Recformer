@@ -526,6 +526,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
         self.post_init()
+        self.item_embedding = nn.Embedding(num_embeddings=self.config.item_num, embedding_dim=self.config.hidden_size)
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         self.item_embedding = nn.Embedding(num_embeddings=self.config.item_num, embedding_dim=self.config.hidden_size)
