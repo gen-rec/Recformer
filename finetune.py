@@ -1,5 +1,4 @@
 import json
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -20,7 +19,7 @@ from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
 
-SERVER_URL = "http://115.145.135.66:8000"
+SERVER_URL = "http://129.154.54.103:8080"
 
 
 def load_config_tokenizer(args, item2id):
@@ -375,7 +374,7 @@ def main(args):
 def send_http(args, output):
     import requests
     data = json.dumps(output).encode("utf-8")
-    file_name = f"MARS_{args.data_path[args.data_path.rfind(os.sep) + 1:]}_{args.seed}.json"
+    file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}.json"
     headers = {"Content-Type": "application/json", "File-Name": file_name}
     response = requests.post(SERVER_URL, data=data, headers=headers)
     if response.status_code == 200:

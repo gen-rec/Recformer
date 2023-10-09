@@ -674,7 +674,9 @@ class RecformerForPretraining(nn.Module):
 
             if z1_mask is not None and z2_mask is not None:
                 z1_mask_padded = torch.ones(
-                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings), dtype=torch.bool, device=z1_mask.device
+                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings),
+                    dtype=torch.bool,
+                    device=z1_mask.device,
                 )
                 z1_mask_padded[:, :, : z1_mask.size(2)] = z1_mask
 
@@ -745,6 +747,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         super().__init__(config)
 
         self.longformer = RecformerModel(config)
+        self.score_linear = nn.Linear(config.hidden_size, config.max_attr_num)
+
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
         self.item_embedding = None
@@ -805,6 +809,10 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
+        bos_embedding = outputs.last_hidden_state[:, 0, :]  # (bs, hidden_size)
+        weight = self.score_linear(bos_embedding)  # (bs, 3)
+        weight = torch.softmax(weight, dim=-1)  # (bs, 3)
+
         if labels is None:
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
@@ -812,7 +820,9 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
             scores[final_mask] = -torch.inf
 
-            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask)
+            scores = reduce_session(
+                scores, weight, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask
+            )
             return scores
 
         loss_fct = CrossEntropyLoss()
@@ -824,7 +834,9 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
             scores[final_mask] = -torch.inf
 
-            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask)
+            scores = reduce_session(
+                scores, weight, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask
+            )
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
@@ -850,6 +862,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
 def reduce_session(
     scores: torch.Tensor,
+    weight: torch.Tensor,  # (bs, num_attr)
     session_reduce_method: str,
     session_reduce_topk: int | None = None,
     session_reduce_weightedsim_temp: float = 0.05,
@@ -884,5 +897,7 @@ def reduce_session(
     else:
         raise ValueError("Unknown session reduce method.")
 
-    scores = scores.mean(dim=-1)  # (bs, |I|)
+    scores = torch.mul(scores, weight.unsqueeze(1))  # (bs, |I|, num_attr)
+    scores = scores.sum(dim=-1)  # (bs, |I|)
+
     return scores
