@@ -28,13 +28,15 @@ def load_data(args):
 
     item2id = read_json(os.path.join(args.data_path, args.item2id_file))
     id2item = {v: k for k, v in item2id.items()}
+    user2id = read_json(os.path.join(args.data_path, args.user2id_file))
+    id2user = {v: k for k, v in user2id.items()}
 
     item_meta_dict_filted = dict()
     for k, v in item_meta_dict.items():
         if k in item2id:
             item_meta_dict_filted[k] = v
 
-    return train, val, test, item_meta_dict_filted, item2id, id2item
+    return train, val, test, item_meta_dict_filted, item2id, id2item, user2id, id2user
 
 
 def parse_finetune_args():
@@ -51,6 +53,7 @@ def parse_finetune_args():
     parser.add_argument("--train_file", type=str, default="train.json")
     parser.add_argument("--dev_file", type=str, default="val.json")
     parser.add_argument("--test_file", type=str, default="test.json")
+    parser.add_argument("--user2id_file", type=str, default="umap.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
     # data process
