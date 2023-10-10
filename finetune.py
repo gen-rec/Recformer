@@ -1,10 +1,10 @@
-import random
 import json
 import os
 from argparse import ArgumentParser
 from datetime import datetime
 from pathlib import Path
 
+import requests
 import torch
 import wandb
 from pytorch_lightning import seed_everything
@@ -12,7 +12,6 @@ from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from wonderwords import RandomWord
-import numpy as np
 
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
@@ -33,12 +32,15 @@ def load_data(args):
     item2id = read_json(os.path.join(args.data_path, args.item2id_file))
     id2item = {v: k for k, v in item2id.items()}
 
+    user2id = read_json(os.path.join(args.data_path, args.user2id_file))
+    id2user = {v: k for k, v in user2id.items()}
+
     item_meta_dict_filted = dict()
     for k, v in item_meta_dict.items():
         if k in item2id:
             item_meta_dict_filted[k] = v
 
-    return train, val, test, item_meta_dict_filted, item2id, id2item
+    return train, val, test, item_meta_dict_filted, item2id, id2item, user2id, id2user
 
 
 tokenizer_glb: RecformerTokenizer = None
@@ -166,6 +168,34 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, scaler, args, train
         wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
 
 
+def predict(model, dataloader, args):
+    model.eval()
+
+    all_predictions = []
+    all_labels = []
+
+    for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
+        for k, v in batch.items():
+            batch[k] = v.to(args.device)
+        labels = labels.to(args.device)
+
+        with torch.no_grad():
+            scores = model(**batch)  # (bs, |I|)
+
+        scores = scores.detach().cpu()
+        labels = labels.detach().cpu()
+
+        predictions = torch.topk(scores, k=50, dim=-1).indices
+
+        all_predictions.append(predictions)
+        all_labels.append(labels)
+
+    all_predictions = torch.cat(all_predictions, dim=0).tolist()
+    all_labels = torch.cat(all_labels, dim=0).squeeze().tolist()
+
+    return all_predictions, all_labels
+
+
 def main():
     parser = ArgumentParser()
     # experiment
@@ -174,7 +204,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
-    parser.add_argument("--data_path", type=str, default=None, required=True)
+    parser.add_argument("--data_path", type=Path, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--ckpt", type=str, default="best_model.bin")
     parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
@@ -182,6 +212,7 @@ def main():
     parser.add_argument("--dev_file", type=str, default="val.json")
     parser.add_argument("--test_file", type=str, default="test.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
+    parser.add_argument("--user2id_file", type=str, default="umap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
 
     # data process
@@ -216,7 +247,7 @@ def main():
     seed_everything(args.seed)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
-    train, val, test, item_meta_dict, item2id, id2item = load_data(args)
+    train, val, test, item_meta_dict, item2id, id2item, user2id, id2user = load_data(args)
 
     if args.data_percent < 1.0:
         filtered_user = json.load(open(Path(args.data_path) / f"filtered_user_{args.data_percent}.json"))
@@ -248,6 +279,8 @@ def main():
 
     path_corpus = Path(args.data_path)
     path_output = Path(args.output_dir) / random_word
+
+    print(f"Recformer_{args.data_path.name.replace('_ours', '')}_{args.seed}.json")
 
     try:
         path_output.mkdir(exist_ok=False, parents=True)
@@ -389,6 +422,20 @@ def main():
 
     if wandb_logger is not None:
         wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
+
+    predictions, labels = predict(model, test_loader, args)
+
+    final = {}
+    for user, prediction, label in zip(test.keys(), predictions, labels):
+        final[id2user[int(user)]] = {"predictions": [id2item[int(item)] for item in prediction], "label": id2item[int(label)]}
+    json.dump(final, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
+
+    URL = "http://129.154.54.103:8080"
+
+    send_data = json.dumps(final).encode("utf-8")
+    headers = {"Content-Type": "application/json", "File-Name": f"Recformer_{args.data_path.name.replace('_ours', '')}_{args.seed}.json"}
+    results = requests.post(URL, data=send_data, headers=headers)
+    print(results.text)
 
 
 if __name__ == "__main__":
