@@ -244,7 +244,7 @@ class RecformerPooler(nn.Module):
             )
             attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))  # Ignore tokens that are False
 
-            hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)
+            hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)  # (bs, attr_num, items_max, seq_len, hidden_size)
 
             # Sum across the required dimension
             summed_states = torch.sum(hidden_states_pooled, dim=3)  # Sum across the sequence length dimension
@@ -253,7 +253,7 @@ class RecformerPooler(nn.Module):
             valid_counts = attr_item_mask.sum(dim=3)
             valid_counts.unsqueeze_(-1)  # Adding an extra dimension to match the dimensionality for division
 
-            valid_counts_eq_0 = torch.eq(valid_counts, 0)
+            valid_counts_eq_0 = torch.eq(valid_counts, 0)  # (bs, attr_num, items_max, 1)
 
             # Avoid division by zero by replacing 0 counts with 1
             valid_counts = torch.where(valid_counts_eq_0, torch.ones_like(valid_counts), valid_counts)
@@ -278,15 +278,21 @@ class RecformerPooler(nn.Module):
                 -1
             )  # (bs, item_num, seq_len, hidden_size)
 
-            # Instead of using NaNs, use 0s and then use the mask to compute the mean
-            num_values = item_mask.sum(dim=2).unsqueeze(-1)  # Count of True values for the mean along seq_len dimension
-            sum_hidden_states = hidden_states_pooled.sum(dim=2)  # Sum along the seq_len dimension
-            hidden_states_pooled = torch.where(
-                num_values > 0, sum_hidden_states / num_values, torch.zeros_like(sum_hidden_states)
-            )
-            hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, items_max, hidden_size)
+            # Sum across the required dimension
+            summed_states = torch.sum(hidden_states_pooled, dim=2)  # Sum across the sequence length dimension
 
-            return hidden_states_pooled, item_mask
+            # Instead of using NaNs, use 0s and then use the mask to compute the mean
+            valid_counts = item_mask.sum(dim=2).unsqueeze(-1)  # Count of True values for the mean along seq_len dimension
+
+            valid_counts_eq_0 = torch.eq(valid_counts, 0)  # (bs, item_num, 1)
+
+            # Avoid division by zero by replacing 0 counts with 1
+            valid_counts = torch.where(valid_counts_eq_0, torch.ones_like(valid_counts), valid_counts)
+
+            # Compute the mean
+            hidden_states_pooled = summed_states / valid_counts  # (bs, item_num, hidden_size)
+
+            return hidden_states_pooled.unsqueeze(1), valid_counts_eq_0.squeeze(-1).unsqueeze(1)
 
         elif self.pooler_type == "token":
             seq_len = hidden_states.shape[1]
@@ -302,7 +308,7 @@ class RecformerPooler(nn.Module):
             hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1).unsqueeze(1)  # (bs, 1, 1, hidden_size)
 
-            return hidden_states_pooled, None
+            return hidden_states_pooled, torch.zeros(hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device)
 
         else:
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")
@@ -787,7 +793,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         batch_size = input_ids.size(0)
 
-        outputs = self.longformer(
+        outputs = self.longformer.forward(
             input_ids,
             attention_mask=attention_mask,
             global_attention_mask=global_attention_mask,
@@ -808,7 +814,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         if labels is None:
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
-            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)  # (|I|, attr_num, 1)
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
             scores[final_mask] = -torch.inf
 
