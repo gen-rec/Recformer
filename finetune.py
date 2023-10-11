@@ -368,13 +368,13 @@ def main(args):
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
 
         # Send to http
-        send_http(args, output)
+        send_http(args, output, random_word)
 
 
-def send_http(args, output):
+def send_http(args, output, run_name):
     import requests
     data = json.dumps(output).encode("utf-8")
-    file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}.json"
+    file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
     headers = {"Content-Type": "application/json", "File-Name": file_name}
     response = requests.post(SERVER_URL, data=data, headers=headers)
     if response.status_code == 200:
