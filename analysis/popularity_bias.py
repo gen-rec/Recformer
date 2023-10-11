@@ -130,7 +130,7 @@ def popularity_bias(data_name, prediction):
 
 def asin2id(file, data):
     args = Namespace(
-        data_path= data,
+        data_path=data,
         train_file="train.json",
         dev_file="val.json",
         test_file="test.json",
@@ -143,7 +143,8 @@ def asin2id(file, data):
     for user, user_prediction in file.items():
         new_prediction[user2id[user]] = {
             'predictions': [item2id[item] for item in user_prediction['predictions']],
-            'target': item2id[user_prediction['target']]
+            'target': item2id[user_prediction['target']] if 'target' in user_prediction else item2id[
+                user_prediction['label']]
         }
     return new_prediction
 
