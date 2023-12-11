@@ -163,6 +163,9 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
             loss = model(**batch)
 
+        if torch.any(torch.isnan(loss)):
+            continue
+
         if wandb_logger is not None:
             wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
             epoch_losses.append(loss.item())
@@ -215,7 +218,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="WWW-Final-Final",
+        project="WWW-Rebuttal",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
@@ -368,7 +371,7 @@ def main(args):
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
 
         # Send to http
-        send_http(args, output, random_word)
+        # send_http(args, output, random_word)
 
 
 def send_http(args, output, run_name):

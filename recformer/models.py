@@ -244,7 +244,9 @@ class RecformerPooler(nn.Module):
             )
             attr_item_mask = torch.mul(attr_mask.unsqueeze(2), item_mask.unsqueeze(1))  # Ignore tokens that are False
 
-            hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(-1)  # (bs, attr_num, items_max, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states.unsqueeze(1).unsqueeze(2) * attr_item_mask.unsqueeze(
+                -1
+            )  # (bs, attr_num, items_max, seq_len, hidden_size)
 
             # Sum across the required dimension
             summed_states = torch.sum(hidden_states_pooled, dim=3)  # Sum across the sequence length dimension
@@ -282,7 +284,9 @@ class RecformerPooler(nn.Module):
             summed_states = torch.sum(hidden_states_pooled, dim=2)  # Sum across the sequence length dimension
 
             # Instead of using NaNs, use 0s and then use the mask to compute the mean
-            valid_counts = item_mask.sum(dim=2).unsqueeze(-1)  # Count of True values for the mean along seq_len dimension
+            valid_counts = item_mask.sum(dim=2).unsqueeze(
+                -1
+            )  # Count of True values for the mean along seq_len dimension
 
             valid_counts_eq_0 = torch.eq(valid_counts, 0)  # (bs, item_num, 1)
 
@@ -308,7 +312,9 @@ class RecformerPooler(nn.Module):
             hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1).unsqueeze(1)  # (bs, 1, 1, hidden_size)
 
-            return hidden_states_pooled, torch.zeros(hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device)
+            return hidden_states_pooled, torch.zeros(
+                hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device
+            )
 
         else:
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")
@@ -680,7 +686,9 @@ class RecformerForPretraining(nn.Module):
 
             if z1_mask is not None and z2_mask is not None:
                 z1_mask_padded = torch.ones(
-                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings), dtype=torch.bool, device=z1_mask.device
+                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings),
+                    dtype=torch.bool,
+                    device=z1_mask.device,
                 )
                 z1_mask_padded[:, :, : z1_mask.size(2)] = z1_mask
 
@@ -814,11 +822,15 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         if labels is None:
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
-            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)  # (|I|, attr_num, 1)
+            all_item_mask = torch.zeros(
+                (scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device
+            )  # (|I|, attr_num, 1)
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
             scores[final_mask] = -torch.inf
 
-            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask)
+            scores = reduce_session(
+                scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask
+            )
             return scores
 
         loss_fct = CrossEntropyLoss()
@@ -830,7 +842,9 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
             scores[final_mask] = -torch.inf
 
-            scores = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask)
+            scores = reduce_session(
+                scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask
+            )
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
@@ -873,20 +887,41 @@ def reduce_session(
         raise NotImplementedError("Mean pooling disabled")
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     elif session_reduce_method == "weightedsim":
-        raise NotImplementedError("Weighted pooling disabled")
-        scores[torch.isnan(scores)] = -torch.inf
+        raw_scores = scores
         scores = scores / session_reduce_weightedsim_temp  # (bs, |I|, num_attr, items_max)
         weights = torch.softmax(scores, dim=-1)  # (bs, |I|, num_attr, items_max)
-        scores = torch.mul(scores, weights)  # (bs, |I|, num_attr, items_max)
-        scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
+        zero_weights_mask = torch.eq(weights, 0)  # (bs, |I|, num_attr, items_max)
+        weights = torch.where(zero_weights_mask, torch.ones_like(weights), weights)  # Replace 0 with 1
+
+        weighted_scores = torch.mul(scores, weights)  # (bs, |I|, num_attr, items_max)
+
+        weighted_scores = torch.where(
+            zero_weights_mask, torch.ones_like(weighted_scores), weighted_scores
+        )  # Replace 0 with 1
+
+        nonzero = torch.count_nonzero(weighted_scores, dim=-1)  # (bs, |I|, num_attr)
+        weighted_scores_reduced = weighted_scores.sum(dim=-1) / nonzero
+
+        if torch.any(torch.isnan(weighted_scores_reduced)):
+            from IPython import embed
+
+            embed()
+            raise ValueError("NaN in scores")
+
+        scores = weighted_scores_reduced
+
     elif session_reduce_method == "topksim":
-        raise NotImplementedError("Topk pooling disabled")
         session_reduce_topk = min(session_reduce_topk, scores.shape[-1])
-        scores[torch.isnan(scores)] = -torch.inf
         scores = scores.topk(session_reduce_topk, dim=-1).values  # (bs, |I|, num_attr, topk)
-        # Mask out any -inf left
-        scores[scores == -torch.inf] = torch.nan
-        scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
+
+        # Filter out any -inf
+        inf_mask = torch.isinf(scores)  # (bs, |I|, num_attr, topk)
+        # Replace inf with 0
+        scores[inf_mask] = 0
+        scores_nonzero = torch.count_nonzero(scores, dim=-1)  # (bs, |I|, num_attr)
+
+        # Mean
+        scores = scores.sum(dim=-1) / scores_nonzero  # (bs, |I|, num_attr)
     else:
         raise ValueError("Unknown session reduce method.")
 
