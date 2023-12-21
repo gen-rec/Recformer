@@ -38,6 +38,7 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_topk = args.session_reduce_topk
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
+    config.attribute_agg_method = args.attribute_agg_method
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 

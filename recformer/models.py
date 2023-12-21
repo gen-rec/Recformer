@@ -764,6 +764,11 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.item_embedding = None
         self.post_init()
 
+        if config.attribute_agg_method == "linear":
+            self.linear_agg_module = nn.Linear(3, 1)
+        else:
+            self.linear_agg_module = None
+
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
@@ -829,7 +834,12 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             scores[final_mask] = -torch.inf
 
             scores = reduce_session(
-                scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask
+                scores,
+                self.config.session_reduce_method,
+                self.config.session_reduce_topk,
+                mask=final_mask,
+                attribute_agg_method=self.config.attribute_agg_method,
+                linear_agg_module=self.linear_agg_module,
             )
             return scores
 
@@ -843,7 +853,12 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             scores[final_mask] = -torch.inf
 
             scores = reduce_session(
-                scores, self.config.session_reduce_method, self.config.session_reduce_topk, mask=final_mask
+                scores,
+                self.config.session_reduce_method,
+                self.config.session_reduce_topk,
+                mask=final_mask,
+                attribute_agg_method=self.config.attribute_agg_method,
+                linear_agg_module=self.linear_agg_module,
             )
 
             if labels.dim() == 2:
@@ -874,6 +889,8 @@ def reduce_session(
     session_reduce_topk: int | None = None,
     session_reduce_weightedsim_temp: float = 0.05,
     mask: torch.Tensor | None = None,
+    attribute_agg_method: str = "mean",
+    linear_agg_module: nn.Module | None = None,
 ):
     """
     Mask tensor: True to mask
@@ -925,5 +942,13 @@ def reduce_session(
     else:
         raise ValueError("Unknown session reduce method.")
 
-    scores = scores.mean(dim=-1)  # (bs, |I|)
+    if attribute_agg_method == "mean":
+        scores = scores.mean(dim=-1)
+    elif attribute_agg_method == "max":
+        scores = scores.max(dim=-1).values
+    elif attribute_agg_method == "linear":
+        scores = linear_agg_module(scores).squeeze(-1)
+    else:
+        raise ValueError("Unknown attribute aggregation method.")
+
     return scores
