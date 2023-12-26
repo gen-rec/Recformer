@@ -39,6 +39,8 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
     config.attribute_agg_method = args.attribute_agg_method
+    config.neg_samples = args.neg_samples
+    config.in_batch_negative = args.in_batch_negative
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -61,38 +63,44 @@ def _par_tokenize_doc(doc):
     return item_id, input_ids, token_type_ids, attr_type_ids
 
 
-def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
+@torch.no_grad()
+def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args, keys: list = None):
     model.eval()
 
-    items = sorted(list(tokenized_items.items()), key=lambda x: x[0])
+    if keys is None:
+        items = sorted(list(tokenized_items.items()), key=lambda x: x[0])
+    else:
+        tokenized_items = {k: tokenized_items[k] for k in keys}
+        items = list(tokenized_items.items())
+
     items = [ele[1] for ele in items]
 
     item_embeddings = []
 
-    with torch.no_grad():
-        for i in tqdm(
-            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-            ncols=100,
-            desc="Encode all items",
-        ):
+    for i in tqdm(
+        range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+        ncols=100,
+        desc="Encode all items",
+        disable=keys is not None,
+    ):
 
-            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+        item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
-            inputs = tokenizer.batch_encode(item_batch, encode_item=False)
+        inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
-            for k, v in inputs.items():
-                inputs[k] = torch.LongTensor(v).to(args.device)
+        for k, v in inputs.items():
+            inputs[k] = torch.LongTensor(v).to(args.device)
 
-            outputs = model(**inputs)
+        outputs = model(**inputs)
 
-            if args.pooler_type != "token":
-                item_embeddings.append(outputs.pooler_output.detach())
-            else:
-                pooler_output = outputs.pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
-                pooler_output = pooler_output.permute(0, 2, 1, 3)  # (bs, max_seq_len, 1, hidden_size)
-                for j in range(pooler_output.shape[0]):
-                    output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
-                    item_embeddings.append(output_)
+        if args.pooler_type != "token":
+            item_embeddings.append(outputs.pooler_output.detach())
+        else:
+            pooler_output = outputs.pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
+            pooler_output = pooler_output.permute(0, 2, 1, 3)  # (bs, max_seq_len, 1, hidden_size)
+            for j in range(pooler_output.shape[0]):
+                output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
+                item_embeddings.append(output_)
 
     if args.pooler_type == "token":
         item_embeddings = torch.nn.utils.rnn.pad_sequence(
@@ -150,7 +158,7 @@ def evaluate(model, dataloader, args, return_preds=False):
     return average_metrics
 
 
-def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: int):
+def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: int, tokenized_items=None):
     global wandb_logger
 
     epoch_losses = []
@@ -158,8 +166,30 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
     model.train()
 
     for step, batch in enumerate(tqdm(dataloader, ncols=100, desc="Training")):
+        labels = None
+        negatives = None
         for k, v in batch.items():
+            if k == "negatives":
+                negatives = v
+                continue
+
+            if k == "labels":
+                labels = v
             batch[k] = v.to(args.device)
+
+        if negatives is None:
+            negative_encodings = None
+            label_encodings = None
+        else:
+            negative_encodings = encode_all_items(
+                model.longformer, tokenizer_glb, tokenized_items, args, keys=negatives
+            )
+            label_encodings = encode_all_items(
+                model.longformer, tokenizer_glb, tokenized_items, args, keys=labels.squeeze().tolist()
+            )
+
+        batch["negative_encodings"] = negative_encodings
+        batch["labels_encodings"] = label_encodings
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
             loss = model(**batch)
@@ -192,6 +222,8 @@ def main(args):
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item, user2id, id2user = load_data(args)
+    items = list(id2item.keys())
+
     config, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
@@ -245,7 +277,10 @@ def main(args):
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
-    train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
+    do_neg_sample = args.neg_samples is not None
+    train_data = RecformerTrainDataset(
+        train, collator=finetune_data_collator, items=items, neg_samples=args.neg_samples
+    )
     val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
 
@@ -268,7 +303,6 @@ def main(args):
             param.requires_grad = False
 
     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
@@ -288,13 +322,14 @@ def main(args):
     patient = 5
 
     for epoch in range(args.num_train_epochs):
-
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-        model.init_item_embedding(item_embeddings)
-
-        train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
+        train_one_epoch(model, train_loader, optimizer, scheduler, args, 1, tokenized_items)
 
         if (epoch + 1) % args.verbose == 0:
+            # TODO: Could regenerate embeddings even when negative samples are not used
+            if do_neg_sample:
+                item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+                model.init_item_embedding(item_embeddings)
+
             dev_metrics = evaluate(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
@@ -323,9 +358,13 @@ def main(args):
     if not args.one_step_training:
         patient = 3
 
-        for epoch in range(args.num_train_epochs):
+        train_data = RecformerTrainDataset(
+            train, collator=finetune_data_collator, items=items, neg_samples=None
+        )
+        train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
 
-            train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
+        for epoch in range(args.num_train_epochs):
+            train_one_epoch(model, train_loader, optimizer, scheduler, args, 2, tokenized_items)
 
             if (epoch + 1) % args.verbose == 0:
                 dev_metrics = evaluate(model, dev_loader, args)
@@ -377,6 +416,7 @@ def main(args):
 
 def send_http(args, output, run_name):
     import requests
+
     data = json.dumps(output).encode("utf-8")
     file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
     headers = {"Content-Type": "application/json", "File-Name": file_name}

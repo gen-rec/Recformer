@@ -247,7 +247,8 @@ class FinetuneDataCollatorWithPadding:
     tokenized_items: Dict
 
     def __call__(
-        self, batch_item_ids: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]]
+        self, batch_item_ids: List[Dict[str, Union[List[int], List[List[int]], torch.Tensor]]],
+        negatives: Optional[List[int]] = None,
     ) -> Dict[str, torch.Tensor]:
 
         """
@@ -272,6 +273,9 @@ class FinetuneDataCollatorWithPadding:
 
         for k, v in batch.items():
             batch[k] = torch.LongTensor(v)
+
+        if negatives is not None:
+            batch["negatives"] = negatives
 
         return batch
 

@@ -5,7 +5,6 @@ from typing import List, Union, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch import distributed
-from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
@@ -769,6 +768,9 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         else:
             self.linear_agg_module = None
 
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.config.in_batch_negative = True
+
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
@@ -776,10 +778,10 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
 
     def similarity_score(self, pooler_output, candidates=None):
-        if candidates is not None:
-            raise NotImplementedError("Negative sampling disabled")
-
-        candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
+        if candidates is None:
+            candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
+        else:
+            candidate_embeddings = candidates
         pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
         sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
 
@@ -799,8 +801,10 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        candidates: Optional[torch.Tensor] = None,  # candidate item ids
-        labels: Optional[torch.Tensor] = None,  # target item ids
+        negative_encodings: Optional[torch.Tensor] = None,
+        labels_encodings: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        negatives: Optional[torch.Tensor] = None,
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -843,9 +847,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             )
             return scores
 
-        loss_fct = CrossEntropyLoss()
-
-        if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
+        if negative_encodings is None:  # using full softmax
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
             all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
@@ -863,22 +865,43 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
-            loss = loss_fct(scores, labels)
+            loss = self.loss_fn(scores, labels)
 
-        else:  ## using sampled softmax
-            raise NotImplementedError("Negative sampling disabled")
-            candidates = torch.cat(
-                (
-                    labels.unsqueeze(-1),
-                    torch.randint(
-                        0, self.config.item_num, size=(batch_size, self.config.finetune_negative_sample_size)
-                    ).to(labels.device),
-                ),
-                dim=-1,
+        else:  # using sampled softmax
+            if self.config.in_batch_negative:
+                pos_neg = torch.cat([labels_encodings, negative_encodings], dim=0)
+            else:
+                pos_neg = torch.cat(
+                    [
+                        torch.ones(
+                            (batch_size, *labels_encodings.shape[1:]),
+                            device=labels_encodings.device,
+                            dtype=labels_encodings.dtype,
+                        ),
+                        negative_encodings,
+                    ],
+                    dim=0,
+                )
+                pos_neg[:, 0] = labels_encodings
+
+            # Construct negative samples
+            scores = self.similarity_score(pooler_output, pos_neg)
+
+            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+            scores[final_mask] = -torch.inf
+
+            scores = reduce_session(
+                scores,
+                self.config.session_reduce_method,
+                self.config.session_reduce_topk,
+                mask=final_mask,
+                attribute_agg_method=self.config.attribute_agg_method,
+                linear_agg_module=self.linear_agg_module,
             )
-            scores = self.similarity_score(pooler_output, candidates)
-            target = torch.zeros_like(labels, device=labels.device)
-            loss = loss_fct(scores, target)
+
+            target = torch.arange(batch_size, device=scores.device)
+            loss = self.loss_fn(scores, target)
 
         return loss
 

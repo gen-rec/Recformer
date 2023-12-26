@@ -91,6 +91,8 @@ def parse_finetune_args():
     parser.add_argument("--random_word", type=str, default=None)
     parser.add_argument("--zero_shot_only", action="store_true")
     parser.add_argument("--attribute_agg_method", type=str, default="mean")
+    parser.add_argument("--neg_samples", type=int, default=None)
+    parser.add_argument("--in_batch_negative", action="store_true")
     return parser.parse_args()
 
 
