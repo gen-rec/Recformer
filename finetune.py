@@ -41,6 +41,7 @@ def load_config_tokenizer(args, item2id):
     config.attribute_agg_method = args.attribute_agg_method
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    tokenizer.add_tokens(["<is_item>", "<is_session>"], special_tokens=True)
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
@@ -78,7 +79,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
             item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
-            inputs = tokenizer.batch_encode(item_batch, encode_item=False)
+            inputs = tokenizer.batch_encode(item_batch, encode_item=False, is_item=True)
 
             for k, v in inputs.items():
                 inputs[k] = torch.LongTensor(v).to(args.device)
@@ -266,6 +267,11 @@ def main(args):
         print("Fix word embeddings.")
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
+
+    # Code for extra 2 tokens
+    print(f"Previous embedding size: {model.longformer.embeddings.word_embeddings.weight.shape}")
+    model.resize_token_embeddings(len(tokenizer))
+    print(f"Current embedding size: {model.longformer.embeddings.word_embeddings.weight.shape}")
 
     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
 

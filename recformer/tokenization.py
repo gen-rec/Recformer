@@ -79,7 +79,7 @@ class RecformerTokenizer(LongformerTokenizer):
 
         return input_ids, token_type_ids, attr_type
 
-    def encode(self, items, encode_item=True, ):
+    def encode(self, items, encode_item=True, is_item=False):
         """
         Encode a sequence of items.
         the order of items:  [past...present]
@@ -88,10 +88,11 @@ class RecformerTokenizer(LongformerTokenizer):
         items = items[::-1]  # reverse items order
         items = items[: self.config.max_item_embeddings - 1]  # truncate the number of items, -1 for <s>
 
-        input_ids = [self.bos_token_id]
-        item_position_ids = [0]
-        token_type_ids = [0]
-        attr_type_ids = [0]
+        input_ids = [self.bos_token_id, self.convert_tokens_to_ids("<is_item>" if is_item else "<is_session>")]
+        assert len(input_ids) == 2
+        item_position_ids = [0, 0]
+        token_type_ids = [0, 0]
+        attr_type_ids = [0, 0]
 
         for item_idx, item in enumerate(items):
 
@@ -179,9 +180,9 @@ class RecformerTokenizer(LongformerTokenizer):
             "attr_type_ids": batch_attr_type_ids,
         }
 
-    def batch_encode(self, item_batch, encode_item=True, pad_to_max=False):
+    def batch_encode(self, item_batch, encode_item=True, pad_to_max=False, is_item=False):
 
-        item_batch = [self.encode(items, encode_item) for items in item_batch]
+        item_batch = [self.encode(items, encode_item, is_item=is_item) for items in item_batch]
 
         return self.padding(item_batch, pad_to_max)
 
