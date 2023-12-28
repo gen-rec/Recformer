@@ -273,6 +273,10 @@ def main(args):
 
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
+
+    del pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]
+    del pretrain_ckpt["longformer.embeddings.item_position_embeddings.weight"]
+
     print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
 
@@ -391,6 +395,7 @@ def main(args):
 
 def send_http(args, output, run_name):
     import requests
+
     data = json.dumps(output).encode("utf-8")
     file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
     headers = {"Content-Type": "application/json", "File-Name": file_name}

@@ -100,6 +100,7 @@ class RecformerEmbeddings(nn.Module):
                 self.token_type_embeddings = nn.Embedding.from_pretrained(
                     torch.zeros(config.token_type_size, config.hidden_size, dtype=torch.float), freeze=True
                 )
+                setattr(self.token_type_embeddings, "skip_init", True)
             case "learnable":
                 self.token_type_embeddings = nn.Embedding(config.token_type_size, config.hidden_size)
             case _:
@@ -112,6 +113,7 @@ class RecformerEmbeddings(nn.Module):
                     torch.zeros(config.max_item_embeddings, config.hidden_size, dtype=torch.float, requires_grad=False),
                     freeze=True,
                 )
+                setattr(self.item_position_embeddings, "skip_init", True)
             case "learnable":
                 # Create a learnable positional embedding matrix
                 self.item_position_embeddings = nn.Embedding(config.max_item_embeddings, config.hidden_size)
@@ -131,10 +133,9 @@ class RecformerEmbeddings(nn.Module):
                 positional_encoding[:, 1::2] = torch.cos(position_indices / denominator)
 
                 self.item_position_embeddings = nn.Embedding.from_pretrained(positional_encoding, freeze=True)
+                setattr(self.item_position_embeddings, "skip_init", True)
             case _:
-                raise ValueError(
-                    f"Item positional embedding method {config.item_pos_enc_method} is not supported"
-                )
+                raise ValueError(f"Item positional embedding method {config.item_pos_enc_method} is not supported")
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
@@ -759,6 +760,25 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             self.linear_agg_module = nn.Linear(3, 1)
         else:
             self.linear_agg_module = None
+
+    def _init_weights(self, module):
+        """Initialize the weights"""
+        if getattr(module, "skip_init", False):
+            return
+
+        if isinstance(module, nn.Linear):
+            # Slightly different from the TF version which uses truncated_normal for initialization
+            # cf https://github.com/pytorch/pytorch/pull/5617
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+        elif isinstance(module, nn.LayerNorm):
+            module.bias.data.zero_()
+            module.weight.data.fill_(1.0)
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
