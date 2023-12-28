@@ -30,7 +30,6 @@ def load_config_tokenizer(args, item2id):
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.session_reduce_method = args.session_reduce_method
     config.pooler_type = args.pooler_type
-    config.original_embedding = args.original_embedding
     config.global_attention_type = args.global_attention_type
     config.session_reduce_topk = args.session_reduce_topk
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp

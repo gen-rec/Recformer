@@ -1,5 +1,6 @@
 import json
 import os
+import warnings
 from argparse import ArgumentParser
 from pathlib import Path
 
@@ -91,6 +92,14 @@ def parse_finetune_args():
     parser.add_argument("--random_word", type=str, default=None)
     parser.add_argument("--zero_shot_only", action="store_true")
     parser.add_argument("--attribute_agg_method", type=str, default="mean")
+    parser.add_argument("--item_pos_enc_method", type=lambda x: str(x).lower(), default="none")
+    parser.add_argument("--token_type_enc_method", type=lambda x: str(x).lower(), default="none")
+
+    parsed = parser.parse_args()
+
+    if parsed.original_embedding:
+        warnings.warn("original_embedding option is ignored. Use --item_pos_enc_method=none instead.")
+
     return parser.parse_args()
 
 

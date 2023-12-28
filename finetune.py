@@ -33,12 +33,14 @@ def load_config_tokenizer(args, item2id):
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.session_reduce_method = args.session_reduce_method
     config.pooler_type = args.pooler_type
-    config.original_embedding = args.original_embedding
     config.global_attention_type = args.global_attention_type
     config.session_reduce_topk = args.session_reduce_topk
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
     config.attribute_agg_method = args.attribute_agg_method
+
+    config.item_pos_enc_method = args.item_pos_enc_method
+    config.token_type_enc_method = args.token_type_enc_method
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -223,7 +225,19 @@ def main(args):
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
-        config=vars(args),
+        config=args,
+        config_exclude_keys=[
+            "dataloader_num_workers",
+            "dev_file",
+            "device",
+            "item2id_file",
+            "meta_file",
+            "metric_ks",
+            "preprocessing_num_workers",
+            "test_file",
+            "train_file",
+            "verbose",
+        ],
         tags=[
             path_corpus.name,
             f"pool_{args.pooler_type}",

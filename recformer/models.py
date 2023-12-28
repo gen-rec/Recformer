@@ -90,19 +90,51 @@ class RecformerEmbeddings(nn.Module):
 
     def __init__(self, config: RecformerConfig):
         super().__init__()
-
-        try:
-            self.original_embedding = config.original_embedding
-        except AttributeError:
-            self.original_embedding = None
+        self.recformer_config = config
 
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
         self.position_embeddings = nn.Embedding(config.max_position_embeddings, config.hidden_size)
-        if self.original_embedding:
-            self.token_type_embeddings = nn.Embedding(1, config.hidden_size)
-        else:
-            self.token_type_embeddings = nn.Embedding(config.token_type_size, config.hidden_size)
-        self.item_position_embeddings = nn.Embedding(config.max_item_embeddings, config.hidden_size)
+
+        match config.token_type_enc_method:
+            case "none":
+                self.token_type_embeddings = nn.Embedding.from_pretrained(
+                    torch.zeros(config.token_type_size, config.hidden_size, dtype=torch.float), freeze=True
+                )
+            case "learnable":
+                self.token_type_embeddings = nn.Embedding(config.token_type_size, config.hidden_size)
+            case _:
+                raise ValueError(f"Token type embedding method {config.token_type_enc_method} is not supported")
+
+        match config.item_pos_enc_method:
+            case "none":
+                # Create a zero positional embedding matrix
+                self.item_position_embeddings = nn.Embedding.from_pretrained(
+                    torch.zeros(config.max_item_embeddings, config.hidden_size, dtype=torch.float, requires_grad=False),
+                    freeze=True,
+                )
+            case "learnable":
+                # Create a learnable positional embedding matrix
+                self.item_position_embeddings = nn.Embedding(config.max_item_embeddings, config.hidden_size)
+            case "sinusoidal":
+                # Create positional encoding directly with torch.zeros
+                positional_encoding = torch.zeros(
+                    config.max_item_embeddings, config.hidden_size, dtype=torch.float, requires_grad=False
+                )
+
+                # Calculate the positional encoding values using PyTorch functions
+                position_indices = torch.arange(config.max_item_embeddings, dtype=torch.float).unsqueeze(1)
+                denominator = torch.pow(
+                    10000, torch.arange(0, config.hidden_size, 2, dtype=torch.float) / config.hidden_size
+                )
+
+                positional_encoding[:, 0::2] = torch.sin(position_indices / denominator)
+                positional_encoding[:, 1::2] = torch.cos(position_indices / denominator)
+
+                self.item_position_embeddings = nn.Embedding.from_pretrained(positional_encoding, freeze=True)
+            case _:
+                raise ValueError(
+                    f"Item positional embedding method {config.item_pos_enc_method} is not supported"
+                )
 
         # self.LayerNorm is not snake-cased to stick with TensorFlow model variable name and be able to load
         # any TensorFlow checkpoint file
@@ -118,80 +150,39 @@ class RecformerEmbeddings(nn.Module):
             config.max_position_embeddings, config.hidden_size, padding_idx=self.padding_idx
         )
 
-        try:
-            self.original_embedding = config.original_embedding
-        except AttributeError:
-            self.original_embedding = None
-
     def forward(
         self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
     ):
-        def original_forward():
-            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
-
-            if position_ids is None:
-                if input_ids is not None:
-                    # Create the position ids from the input token ids. Any padded tokens remain padded.
-                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
-                else:
-                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
-
+        if position_ids is None:
             if input_ids is not None:
-                input_shape = input_ids.size()
+                # Create the position ids from the input token ids. Any padded tokens remain padded.
+                position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
             else:
-                input_shape = inputs_embeds.size()[:-1]
+                position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
 
-            # Ignore items
-            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=position_ids.device)
-
-            if inputs_embeds is None:
-                inputs_embeds = self.word_embeddings(input_ids)
-            position_embeddings = self.position_embeddings(position_ids)
-            token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-            embeddings = inputs_embeds + position_embeddings + token_type_embeddings
-            embeddings = self.LayerNorm(embeddings)
-            embeddings = self.dropout(embeddings)
-            return embeddings
-
-        def recformer_forward():
-            nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
-
-            if position_ids is None:
-                if input_ids is not None:
-                    # Create the position ids from the input token ids. Any padded tokens remain padded.
-                    position_ids = create_position_ids_from_input_ids(input_ids, self.padding_idx).to(input_ids.device)
-                else:
-                    position_ids = self.create_position_ids_from_inputs_embeds(inputs_embeds)
-
-            if input_ids is not None:
-                input_shape = input_ids.size()
-            else:
-                input_shape = inputs_embeds.size()[:-1]
-
-            seq_length = input_shape[1]
-
-            if position_ids is None:
-                position_ids = self.position_ids[:, :seq_length]
-
-            if token_type_ids is None:
-                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
-
-            if inputs_embeds is None:
-                inputs_embeds = self.word_embeddings(input_ids)
-            position_embeddings = self.position_embeddings(position_ids)
-            item_position_embeddings = self.item_position_embeddings(item_position_ids)
-            token_type_embeddings = self.token_type_embeddings(token_type_ids)
-
-            embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
-            embeddings = self.LayerNorm(embeddings)
-            embeddings = self.dropout(embeddings)
-            return embeddings
-
-        if self.original_embedding:
-            return original_forward()
+        if input_ids is not None:
+            input_shape = input_ids.size()
         else:
-            return recformer_forward()
+            input_shape = inputs_embeds.size()[:-1]
+
+        seq_length = input_shape[1]
+
+        if position_ids is None:
+            position_ids = self.position_ids[:, :seq_length]
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+        if inputs_embeds is None:
+            inputs_embeds = self.word_embeddings(input_ids)
+
+        position_embeddings = self.position_embeddings(position_ids)
+        item_position_embeddings = self.item_position_embeddings(item_position_ids)
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+
+        embeddings = inputs_embeds + position_embeddings + token_type_embeddings + item_position_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        embeddings = self.dropout(embeddings)
+
+        return embeddings
 
     def create_position_ids_from_inputs_embeds(self, inputs_embeds):
         """
