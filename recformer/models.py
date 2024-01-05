@@ -771,15 +771,24 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
 
-    def similarity_score(self, pooler_output, candidates=None):
+    def similarity_score(self, pooler_output, pooler_output_mask, candidates=None):
         if candidates is not None:
             raise NotImplementedError("Negative sampling disabled")
 
         candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
         pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
-        sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
 
-        return sim
+        scaled_dot_product = torch.matmul(pooler_output, candidate_embeddings.transpose(-1, -2))  # (batch_size, |I|, attr_num, items_max, 1)
+        scaled_dot_product.squeeze_(-1)  # (batch_size, |I|, attr_num, items_max)
+        scaled_dot_product /= torch.sqrt(torch.tensor(candidate_embeddings.size(-1), dtype=torch.float, device=scaled_dot_product.device))  # (batch_size, |I|, attr_num, items_max)
+
+        scaled_dot_product.transpose(0, 1)[:, pooler_output_mask] = -1e9  # (|I|, batch_size, attr_num, items_max)
+
+        weight = torch.softmax(scaled_dot_product, dim=-1)  # (batch_size, |I|, attr_num, items_max)
+
+        score = torch.mul(weight, pooler_output)  # (batch_size, |I|, attr_num, items_max, hidden_size)
+
+        return score
 
     def forward(
         self,
@@ -821,7 +830,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
         if labels is None:
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+            scores = self.similarity_score(pooler_output, pooler_output_mask)  # (bs, |I|, attr_num, items_max)
 
             all_item_mask = torch.zeros(
                 (scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device
@@ -842,7 +851,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         loss_fct = CrossEntropyLoss()
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+            scores = self.similarity_score(pooler_output, pooler_output_mask)  # (bs, |I|, attr_num, items_max)
 
             all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
             final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
@@ -901,7 +910,13 @@ def reduce_session(
         scores = scores.nanmean(dim=-1)  # (bs, |I|, num_attr)
     elif session_reduce_method == "weightedsim":
         raw_scores = scores
-        scores = scores / session_reduce_weightedsim_temp  # (bs, |I|, num_attr, items_max)
+        scores = scores / torch.sqrt()  # (bs, |I|, num_attr, items_max)
+
+
+
+
+
+
         weights = torch.softmax(scores, dim=-1)  # (bs, |I|, num_attr, items_max)
         zero_weights_mask = torch.eq(weights, 0)  # (bs, |I|, num_attr, items_max)
         weights = torch.where(zero_weights_mask, torch.ones_like(weights), weights)  # Replace 0 with 1
