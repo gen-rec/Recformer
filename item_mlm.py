@@ -207,6 +207,7 @@ class ItemMLMCollator():
     tokenizer: RecformerTokenizer
     tokenized_items: dict
     mlm_ratio: float
+    config: RecformerConfig
 
     def __call__(self, batch_item_ids: List[int]):
         """
@@ -268,9 +269,9 @@ class ItemMLMCollator():
                 assert len(input_id_seq) == len(label_seq) == len(
                     attention_mask_seq), "input_id_seq and label_seq must have the same length."
 
-            batch_input_ids.append(torch.LongTensor(input_id_seq))
-            batch_attention_mask.append(torch.LongTensor(attention_mask_seq))
-            batch_labels.append(torch.LongTensor(label_seq))
+            batch_input_ids.append(torch.LongTensor(input_id_seq[:self.config.max_token_num]))
+            batch_attention_mask.append(torch.LongTensor(attention_mask_seq[:self.config.max_token_num]))
+            batch_labels.append(torch.LongTensor(label_seq[:self.config.max_token_num]))
 
         return batch_input_ids, batch_attention_mask, batch_labels
 
@@ -337,6 +338,7 @@ def main(args):
     mlm_train_dataset = mlm_dataset[: int(len(mlm_dataset) * 0.8)]
     mlm_test_dataset = mlm_dataset[int(len(mlm_dataset) * 0.8):]
     mlm_collator = ItemMLMCollator()
+    mlm_collator.config = config
     mlm_collator.tokenizer = tokenizer
     mlm_collator.tokenized_items = tokenized_items
     mlm_collator.mlm_ratio = args.mlm_ratio
