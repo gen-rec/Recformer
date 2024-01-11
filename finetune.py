@@ -1,6 +1,8 @@
 import json
+from argparse import Namespace
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import torch
 import wandb
@@ -16,10 +18,141 @@ from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
-wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
 
-SERVER_URL = "http://129.154.54.103:8080"
+
+class Trainer:
+    def __init__(
+        self,
+        args: Namespace,
+        model: RecformerForSeqRec,
+        tokenizer: RecformerTokenizer,
+        train_dataset: RecformerTrainDataset,
+        val_dataset: RecformerEvalDataset,
+        test_dataset: RecformerEvalDataset,
+        wandb_logger: wandb.sdk.wandb_run.Run | None = None,
+    ):
+        self.args = args
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = args.device
+
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
+
+        self.wandb_logger = wandb_logger
+
+    def train(self):
+        self._train_stage_1()
+
+        print("Load best model in stage 1.")
+        self.model.load_state_dict(torch.load(self.args.output_dir / "stage_1_best.pt"))  # TODO: change path
+
+        self.test("stage_1_test")
+
+        if self.args.one_step_training:
+            return
+
+        self._train_stage_2()
+
+        print("Load best model in stage 2.")
+        try:
+            self.model.load_state_dict(torch.load(self.args.output_dir / "stage_2_best.pt"))  # TODO: change path
+        except FileNotFoundError:
+            print("No best model in stage 2. Use the latest model.")
+
+        self.test("stage_2_test")
+
+    def test(
+        self,
+        test_name: Literal["stage_1_test", "stage_2_test", "zero-shot"],
+        return_preds: bool = False,
+        log: bool = True,
+    ):
+        self.model.eval()
+
+        dataloader = self._get_test_dataloader()
+        ranker = Ranker(self.args.metric_ks)
+        average_meter_set = AverageMeterSet()
+
+        all_scores = []
+        all_labels = []
+
+        for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
+
+            for k, v in batch.items():
+                batch[k] = v.to(self.device)
+            labels = labels.to(self.device)
+
+            with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=self.args.bf16):
+                scores = self.model.forward(**batch)  # (bs, |I|, num_attr, items_max)
+
+            all_scores.append(scores.detach().clone().cpu())
+            all_labels.append(labels.detach().clone().cpu())
+
+            assert torch.isnan(scores).sum() == 0, "NaN in scores."
+
+            res = ranker.forward(scores, labels)
+
+            metrics = {}
+            for i, k in enumerate(self.args.metric_ks):
+                metrics["NDCG@%d" % k] = res[2 * i]
+                metrics["Recall@%d" % k] = res[2 * i + 1]
+            metrics["MRR"] = res[-3]
+            metrics["AUC"] = res[-2]
+
+            for k, v in metrics.items():
+                average_meter_set.update(k, v)
+
+        average_metrics = average_meter_set.averages()
+        print(f"Test set {test_name}: {average_metrics}")
+
+        if log and self.wandb_logger is not None:
+            self.wandb_logger.log({f"{test_name}/{k}": v for k, v in average_metrics.items()})
+
+        if return_preds:
+            all_scores = torch.cat(all_scores, dim=0)
+            all_labels = torch.cat(all_labels, dim=0).squeeze()
+            all_predictions = torch.topk(all_scores, k=max(self.args.metric_ks), dim=1).indices
+            return average_metrics, all_predictions, all_labels
+
+        return average_metrics
+
+    def _train_stage_1(self):
+        self.model.train()
+
+    def _train_stage_2(self):
+        pass
+
+    def _encode_all_items(self):
+        self.model.eval()
+
+        item_embeddings = None  # TODO: fill
+
+        self.model.init_item_embedding(item_embeddings)
+
+    def _get_train_dataloader(self):
+        return DataLoader(
+            self.train_dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=self.train_dataset.collate_fn
+        )
+
+    def _get_val_dataloader(self):
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.args.batch_size * self.args.eval_test_batch_size_multiplier,
+            collate_fn=self.val_dataset.collate_fn,
+        )
+
+    def _get_test_dataloader(self):
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.args.batch_size * self.args.eval_test_batch_size_multiplier,
+            collate_fn=self.test_dataset.collate_fn,
+        )
+
+    def _calculate_approximate_train_steps(self):
+        return int(len(self.train_dataset) / self.args.batch_size) * self.args.num_train_epochs
 
 
 def load_config_tokenizer(args, item2id):
@@ -118,52 +251,6 @@ def encode_all_items(
     return item_embeddings
 
 
-def evaluate(model, dataloader, args, return_preds=False):
-    model.eval()
-
-    ranker = Ranker(args.metric_ks)
-    average_meter_set = AverageMeterSet()
-
-    all_scores = []
-    all_labels = []
-
-    for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
-
-        for k, v in batch.items():
-            batch[k] = v.to(args.device)
-        labels = labels.to(args.device)
-
-        with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            scores = model(**batch)  # (bs, |I|, num_attr, items_max)
-
-        all_scores.append(scores.detach().clone().cpu())
-        all_labels.append(labels.detach().clone().cpu())
-
-        assert torch.isnan(scores).sum() == 0, "NaN in scores."
-
-        res = ranker(scores, labels)
-
-        metrics = {}
-        for i, k in enumerate(args.metric_ks):
-            metrics["NDCG@%d" % k] = res[2 * i]
-            metrics["Recall@%d" % k] = res[2 * i + 1]
-        metrics["MRR"] = res[-3]
-        metrics["AUC"] = res[-2]
-
-        for k, v in metrics.items():
-            average_meter_set.update(k, v)
-
-    average_metrics = average_meter_set.averages()
-
-    if return_preds:
-        all_scores = torch.cat(all_scores, dim=0)
-        all_labels = torch.cat(all_labels, dim=0).squeeze()
-        all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
-        return average_metrics, all_predictions, all_labels
-
-    return average_metrics
-
-
 def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: int):
     global wandb_logger
 
@@ -235,7 +322,6 @@ def main(args):
     except FileExistsError:
         raise FileExistsError(f"Output directory ({path_output}) already exists.")
 
-    global wandb_logger
     wandb_logger = wandb.init(
         project="WWW-Rebuttal",
         entity="gen-rec",
@@ -252,12 +338,11 @@ def main(args):
         ],
     )
 
-    doc_tuples = [
-        _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
-    ]
     tokenized_items = {
         item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
-        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+        for item_id, input_ids, token_type_ids, attr_type_ids in [
+            _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+        ]
     }
 
     # Tokenize item descriptions
@@ -278,14 +363,6 @@ def main(args):
     train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
     val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
-
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
-    dev_loader = DataLoader(
-        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn
-    )
-    test_loader = DataLoader(
-        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
-    )
 
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
@@ -313,13 +390,13 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = evaluate(model, test_loader, args)
-    if wandb_logger is not None:
-        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-    print(f"Test set Zero-shot: {test_metrics}")
+    trainer = Trainer(args, model, train_data, val_data, test_data)
+    trainer.test("zero-shot")
 
     if args.zero_shot_only:
         return
+
+    trainer.train()
 
     best_target = float("-inf")
     patient = 5
@@ -409,22 +486,6 @@ def main(args):
             output[user] = {"predictions": prediction, "target": label}
 
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
-
-        # Send to http
-        # send_http(args, output, random_word)
-
-
-def send_http(args, output, run_name):
-    import requests
-
-    data = json.dumps(output).encode("utf-8")
-    file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
-    headers = {"Content-Type": "application/json", "File-Name": file_name}
-    response = requests.post(SERVER_URL, data=data, headers=headers)
-    if response.status_code == 200:
-        print("Send to server successfully.")
-    else:
-        print("Send to server failed.")
 
 
 if __name__ == "__main__":
