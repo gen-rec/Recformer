@@ -79,7 +79,7 @@ class RecformerTokenizer(LongformerTokenizer):
 
         return input_ids, token_type_ids, attr_type
 
-    def encode(self, items, encode_item=True, is_item=False):
+    def encode(self, items, encode_item=True, is_item=False, description=None):
         """
         Encode a sequence of items.
         the order of items:  [past...present]
@@ -109,10 +109,17 @@ class RecformerTokenizer(LongformerTokenizer):
 
             item_position_ids += [item_idx + 1] * len(item_input_ids)  # item_idx + 1 make idx starts from 1 (0 for <s>)
 
-        input_ids = input_ids[: self.config.max_token_num]
-        item_position_ids = item_position_ids[: self.config.max_token_num]
-        token_type_ids = token_type_ids[: self.config.max_token_num]
-        attr_type_ids = attr_type_ids[: self.config.max_token_num]
+            if is_item:
+                assert len(items) == 1
+                input_ids += description
+                token_type_ids += [0] * len(description)
+                attr_type_ids += [0] * len(description)
+                item_position_ids += [item_idx + 1] * len(description)
+
+        input_ids = input_ids[: self.config.max_token_num - 1] + [self.eos_token_id]
+        item_position_ids = item_position_ids[: self.config.max_token_num - 1] + [0]
+        token_type_ids = token_type_ids[: self.config.max_token_num - 1] + [0]
+        attr_type_ids = attr_type_ids[: self.config.max_token_num - 1] + [0]
 
         attention_mask = [1] * len(input_ids)
         if self.config.global_attention_type == "cls":
@@ -180,9 +187,15 @@ class RecformerTokenizer(LongformerTokenizer):
             "attr_type_ids": batch_attr_type_ids,
         }
 
-    def batch_encode(self, item_batch, encode_item=True, pad_to_max=False, is_item=False):
+    def batch_encode(self, item_batch, encode_item=True, pad_to_max=False, is_item=False, description_batch=None):
 
-        item_batch = [self.encode(items, encode_item, is_item=is_item) for items in item_batch]
+        if description_batch is None and not is_item:
+            item_batch = [self.encode(items, encode_item, is_item=is_item) for items in item_batch]
+        else:
+            item_batch = [
+                self.encode(items, encode_item, is_item=is_item, description=description)
+                for items, description in zip(item_batch, description_batch)
+            ]
 
         return self.padding(item_batch, pad_to_max)
 

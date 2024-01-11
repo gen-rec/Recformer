@@ -62,11 +62,18 @@ def _par_tokenize_doc(doc):
     return item_id, input_ids, token_type_ids, attr_type_ids
 
 
-def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
+def encode_all_items(
+    model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args, item_description=None
+):
     model.eval()
 
     items = sorted(list(tokenized_items.items()), key=lambda x: x[0])
     items = [ele[1] for ele in items]
+    if item_description is not None:
+        descriptions = sorted(list(item_description.items()), key=lambda x: x[0])
+        descriptions = [ele[1] for ele in descriptions]
+    else:
+        descriptions = None
 
     item_embeddings = []
 
@@ -78,8 +85,14 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
         ):
 
             item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+            description_batch = [
+                description
+                for description in descriptions[i : i + args.batch_size * args.encode_item_batch_size_multiplier]
+            ]
 
-            inputs = tokenizer.batch_encode(item_batch, encode_item=False, is_item=True)
+            inputs = tokenizer.batch_encode(
+                item_batch, encode_item=False, is_item=True, description_batch=description_batch
+            )
 
             for k, v in inputs.items():
                 inputs[k] = torch.LongTensor(v).to(args.device)
@@ -192,7 +205,11 @@ def main(args):
     seed_everything(args.seed, workers=True)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
-    train, val, test, item_meta_dict, item2id, id2item, user2id, id2user = load_data(args)
+    train, val, test, item_meta_dict, item2id, id2item, user2id, id2user, additional_meta_dict = load_data(args)
+
+    for k in item_meta_dict:
+        item_meta_dict[k]["title"] = additional_meta_dict[k]["title"]
+
     config, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
@@ -243,6 +260,18 @@ def main(args):
         for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
     }
 
+    # Tokenize item descriptions
+    item_description_map = {
+        item2id[k1]: "description: " + v1["description"]
+        for k1, v1 in additional_meta_dict.items()
+        if k1 in item2id.keys()
+    }
+
+    tokenized_item_descriptions = {
+        item_id: tokenizer.convert_tokens_to_ids(tokenizer.tokenize(desc))[:512]  # TODO: Parameterize max length
+        for item_id, desc in tqdm(item_description_map.items(), ncols=100, desc="Tokenize item descriptions")
+    }
+
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
@@ -273,7 +302,9 @@ def main(args):
     model.resize_token_embeddings(len(tokenizer))
     print(f"Current embedding size: {model.longformer.embeddings.word_embeddings.weight.shape}")
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    item_embeddings = encode_all_items(
+        model.longformer, tokenizer, tokenized_items, args, item_description=tokenized_item_descriptions
+    )
 
     model.init_item_embedding(item_embeddings)
 
@@ -295,7 +326,9 @@ def main(args):
 
     for epoch in range(args.num_train_epochs):
 
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+        item_embeddings = encode_all_items(
+            model.longformer, tokenizer, tokenized_items, args, item_description=tokenized_item_descriptions
+        )
         model.init_item_embedding(item_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
@@ -383,6 +416,7 @@ def main(args):
 
 def send_http(args, output, run_name):
     import requests
+
     data = json.dumps(output).encode("utf-8")
     file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
     headers = {"Content-Type": "application/json", "File-Name": file_name}

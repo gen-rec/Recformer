@@ -25,6 +25,7 @@ def load_data(args):
     val = read_json(os.path.join(args.data_path, args.dev_file), True)
     test = read_json(os.path.join(args.data_path, args.test_file), True)
     item_meta_dict = json.load(open(os.path.join(args.data_path, args.meta_file)))
+    additional_meta_dict = json.load(open(os.path.join(args.data_path, args.additional_meta_file), encoding="utf-8"))
 
     item2id = read_json(os.path.join(args.data_path, args.item2id_file))
     id2item = {v: k for k, v in item2id.items()}
@@ -36,7 +37,7 @@ def load_data(args):
         if k in item2id:
             item_meta_dict_filted[k] = v
 
-    return train, val, test, item_meta_dict_filted, item2id, id2item, user2id, id2user
+    return train, val, test, item_meta_dict_filted, item2id, id2item, user2id, id2user, additional_meta_dict
 
 
 def parse_finetune_args():
@@ -56,6 +57,7 @@ def parse_finetune_args():
     parser.add_argument("--user2id_file", type=str, default="umap.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
+    parser.add_argument("--additional_meta_file", type=str, default="meta.json")
     # data process
     parser.add_argument(
         "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."
