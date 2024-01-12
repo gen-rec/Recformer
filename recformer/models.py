@@ -1,4 +1,5 @@
 import logging
+import math
 from dataclasses import dataclass
 from typing import List, Union, Optional, Tuple
 
@@ -765,6 +766,18 @@ class AttributeLayer(nn.Module):
 
 
 class RecformerForSeqRec(LongformerPreTrainedModel):
+    @staticmethod
+    def get_sinusoidal_pos_enc(max_len, d_model):
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+
+        pe = torch.zeros(max_len, d_model)
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        return pe
+
     def __init__(self, config: RecformerConfig):
         super().__init__(config)
 
@@ -772,6 +785,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.sim = Similarity(config)
 
         # Model and embedding for additional layer
+        self.item_embedding = None
         self.atomic_embedding = nn.Embedding(config.item_num + 1, config.linear_out, padding_idx=0)  # +1 for padding
         self.self_attn = nn.MultiheadAttention(config.linear_out, config.attr_nhead, dropout=config.attr_dropout, batch_first=True)
 
@@ -781,6 +795,10 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             self.linear_agg_module = nn.Linear(3, 1)
         else:
             self.linear_agg_module = None
+
+        self.pos_encoding = nn.Embedding.from_pretrained(
+            self.get_sinusoidal_pos_enc(config.max_item_embeddings, config.linear_out), freeze=True
+        )
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
@@ -854,6 +872,15 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         concat_output_flattened = concat_output.transpose(1, 2).flatten(1, 2)  # (bs, items_max * (attr_num + 1), hidden_size)
         concat_mask_flattened = concat_mask.transpose(1, 2).flatten(1, 2)  # (bs, items_max * (attr_num + 1))
+
+        # Position encoding
+        position_ids = torch.arange(1, max_position + 1, device=pooler_output.device).unsqueeze(0)  # (1, items_max)
+        position_ids = position_ids.repeat(concat_output.shape[1], 1)  # (attr_num + 1, items_max)
+        position_ids = position_ids.T.flatten(0, 1)  # (items_max * (attr_num + 1), )
+
+        position_encoding = self.pos_encoding.forward(position_ids)  # (items_max * (attr_num + 1), hidden_size)
+
+        concat_output_flattened += position_encoding.unsqueeze(0)  # (bs, items_max * (attr_num + 1), hidden_size)
 
         attn_output = self.self_attn.forward(
             concat_output_flattened, concat_output_flattened, concat_output_flattened, key_padding_mask=concat_mask_flattened, need_weights=False
