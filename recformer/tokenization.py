@@ -108,10 +108,15 @@ class RecformerTokenizer(LongformerTokenizer):
 
             item_position_ids += [item_idx + 1] * len(item_input_ids)  # item_idx + 1 make idx starts from 1 (0 for <s>)
 
-        input_ids = input_ids[: self.config.max_token_num]
-        item_position_ids = item_position_ids[: self.config.max_token_num]
-        token_type_ids = token_type_ids[: self.config.max_token_num]
-        attr_type_ids = attr_type_ids[: self.config.max_token_num]
+        input_ids = input_ids[: self.config.max_token_num - 1]
+        item_position_ids = item_position_ids[: self.config.max_token_num - 1]
+        token_type_ids = token_type_ids[: self.config.max_token_num - 1]
+        attr_type_ids = attr_type_ids[: self.config.max_token_num - 1]
+
+        input_ids += [self.eos_token_id]
+        item_position_ids += [0]  # len(items) + 1 for <s>
+        token_type_ids += [0]
+        attr_type_ids += [0]
 
         attention_mask = [1] * len(input_ids)
         if self.config.global_attention_type == "cls":
