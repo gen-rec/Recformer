@@ -55,7 +55,7 @@ class RecformerConfig(LongformerConfig):
         # Attribute layer
         self.attr_nhead = 4
         self.attr_dropout = 0.1
-
+        self.attr_dim_feedforward = 768
 
 @dataclass
 class RecformerPretrainingOutput:
@@ -787,7 +787,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         # Model and embedding for additional layer
         self.item_embedding = None
         self.atomic_embedding = nn.Embedding(config.item_num + 1, config.linear_out, padding_idx=0)  # +1 for padding
-        self.self_attn = nn.MultiheadAttention(config.linear_out, config.attr_nhead, dropout=config.attr_dropout, batch_first=True)
+        layer = nn.TransformerEncoderLayer(config.linear_out, config.attr_nhead, config.attr_dim_feedforward, batch_first=True)
+        self.self_attn = nn.TransformerEncoder(layer, 1)
 
         self.post_init()
 
@@ -883,8 +884,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         concat_output_flattened += position_encoding.unsqueeze(0)  # (bs, items_max * (attr_num + 1), hidden_size)
 
         attn_output = self.self_attn.forward(
-            concat_output_flattened, concat_output_flattened, concat_output_flattened, key_padding_mask=concat_mask_flattened, need_weights=False
-        )[0]  # (bs, items_max * (attr_num + 1), hidden_size)
+            concat_output_flattened, src_key_padding_mask=concat_mask_flattened
+        )  # (bs, items_max * (attr_num + 1), hidden_size)
 
         recon = attn_output.unflatten(1, (concat_output.shape[2], concat_output.shape[1])).transpose(2, 1)  # (bs, attr_num + 1, items_max, hidden_size)
 
