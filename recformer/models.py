@@ -72,6 +72,7 @@ class RecformerPretrainingOutput:
 @dataclass
 class RecformerBaseModelOutputWithPooling(LongformerBaseModelOutputWithPooling):
     mask: Optional[torch.Tensor] = None
+    linear_hidden_states: Optional[torch.Tensor] = None
 
 
 def create_position_ids_from_input_ids(input_ids, padding_idx):
@@ -264,7 +265,7 @@ class RecformerPooler(nn.Module):
             # Compute the mean
             hidden_states_pooled = summed_states / valid_counts  # (bs, attr_num, items_max, hidden_size)
 
-            return hidden_states_pooled, valid_counts_eq_0.squeeze(-1)
+            return hidden_states_pooled, valid_counts_eq_0.squeeze(-1), hidden_states
 
         elif self.pooler_type == "item":
             num_items = item_position_ids.clone()
@@ -297,7 +298,7 @@ class RecformerPooler(nn.Module):
             # Compute the mean
             hidden_states_pooled = summed_states / valid_counts  # (bs, item_num, hidden_size)
 
-            return hidden_states_pooled.unsqueeze(1), valid_counts_eq_0.squeeze(-1).unsqueeze(1)
+            return hidden_states_pooled.unsqueeze(1), valid_counts_eq_0.squeeze(-1).unsqueeze(1), hidden_states
 
         elif self.pooler_type == "token":
             seq_len = hidden_states.shape[1]
@@ -307,7 +308,7 @@ class RecformerPooler(nn.Module):
             hidden_states_pooled[~mask] = torch.nan  # (bs, seq_len, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, seq_len, hidden_size)
 
-            return hidden_states_pooled, mask
+            return hidden_states_pooled, mask, hidden_states
 
         elif self.pooler_type == "cls":
             hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
@@ -315,7 +316,7 @@ class RecformerPooler(nn.Module):
 
             return hidden_states_pooled, torch.zeros(
                 hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device
-            )
+            ), hidden_states
 
         else:
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")
@@ -517,7 +518,7 @@ class RecformerModel(LongformerPreTrainedModel):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-        pooled_output, mask = (
+        pooled_output, mask, linear_hidden_states = (
             self.pooler.forward(
                 attention_mask=attention_mask,
                 hidden_states=sequence_output,
@@ -535,6 +536,7 @@ class RecformerModel(LongformerPreTrainedModel):
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             hidden_states=encoder_outputs.hidden_states,
+            linear_hidden_states=linear_hidden_states,
             attentions=encoder_outputs.attentions,
             global_attentions=encoder_outputs.global_attentions,
             mask=mask,
@@ -801,6 +803,10 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             self.get_sinusoidal_pos_enc(config.max_item_embeddings, config.linear_out), freeze=True
         )
 
+        self.gating_layer = nn.Sequential(
+            nn.Linear(config.hidden_size, 4), nn.Softmax(dim=-1)
+        )
+
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
@@ -915,11 +921,16 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         attn_item_output = recon[:, 0, 0, :]  # (bs, hidden_size)
         attn_attr_output = recon[:, 1:, 0, :]  # (bs, attr_num, hidden_size)
 
-        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight[1:].unsqueeze(0))  # (bs, |I|, items_max)
-        attr_sim = self.similarity_score(attn_attr_output)  # (bs, |I|, attr_num, items_max)
+        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight[1:].unsqueeze(0))  # (bs, |I|)
+        attr_sim = self.similarity_score(attn_attr_output)  # (bs, |I|, attr_num)
 
-        scores = torch.cat([item_sim.unsqueeze(2), attr_sim], dim=2)  # (bs, |I|, attr_num + 1, items_max)
-        reduced_scores = scores.mean(dim=-1)  # (bs, |I|, attr_num + 1)
+        scores = torch.cat([item_sim.unsqueeze(2), attr_sim], dim=2)  # (bs, |I|, attr_num + 1)
+
+        bos_embeddings = outputs.last_hidden_state[:, 0, :]  # (bs, hidden_size)
+        weight = self.gating_layer(bos_embeddings)  # (bs, 4)
+
+        reduced_scores = torch.mul(scores, weight.unsqueeze(1))  # (bs, |I|, attr_num + 1)
+        reduced_scores = reduced_scores.sum(dim=2)  # (bs, |I|)
 
         if labels is None:
             return reduced_scores
