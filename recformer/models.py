@@ -55,7 +55,7 @@ class RecformerConfig(LongformerConfig):
         # Attribute layer
         self.attr_nhead = 4
         self.attr_dropout = 0.1
-
+        self.attr_dim_feedforward = 768
 
 @dataclass
 class RecformerPretrainingOutput:
@@ -787,7 +787,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         # Model and embedding for additional layer
         self.item_embedding = None
         self.atomic_embedding = nn.Embedding(config.item_num + 1, config.linear_out, padding_idx=0)  # +1 for padding
-        self.self_attn = nn.MultiheadAttention(config.linear_out, config.attr_nhead, dropout=config.attr_dropout, batch_first=True)
+        layer = nn.TransformerEncoderLayer(config.linear_out, config.attr_nhead, config.attr_dim_feedforward, batch_first=True)
+        self.self_attn = nn.TransformerEncoder(layer, 1)
 
         self.post_init()
 
@@ -804,6 +805,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
 
+        embeddings = embeddings.squeeze(2)
+
         self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
 
     def similarity_score(self, pooler_output, candidates=None):
@@ -815,6 +818,16 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
 
         return sim
+
+    @staticmethod
+    def _left_padding(item_seq: list[list[int]], max_position: int):
+        batch_size = len(item_seq)
+
+        result = torch.zeros((batch_size, max_position), dtype=torch.long)
+        for i, seq in enumerate(item_seq):
+            result[i, max_position - len(seq):] = torch.tensor(seq, dtype=torch.long) + 1
+
+        return result
 
     def forward(
         self,
@@ -853,13 +866,16 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             return_dict=True,
         )
 
+        # MASK: True to mask
+
         max_position = item_position_ids.clone()
         max_position[max_position == 50] = 0
-        max_position = torch.max(max_position)
+        max_position = torch.max(max_position).item()
 
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
+        # item_seq_plus_1 = self._left_padding(item_seq, max_position).to(self.device)  # (bs, items_max)
         item_seq_plus_1 = [torch.tensor([s + 1 for s in seq], dtype=torch.long) for seq in item_seq]
         item_seq_plus_1 = pad_sequence(item_seq_plus_1, batch_first=True, padding_value=0).to(pooler_output.device)  # (bs, items_max)
         item_seq_plus_1 = item_seq_plus_1[:, :max_position]  # (bs, items_max)
@@ -867,6 +883,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         atomic_embeddings = self.atomic_embedding.forward(item_seq_plus_1)  # (bs, items_max, hidden_size)
         atomic_embeddings_mask = torch.eq(item_seq_plus_1, 0)  # (bs, items_max)
 
+        # Concat atomic embeddings with pooler output
         concat_output = torch.cat([atomic_embeddings.unsqueeze(1), pooler_output], dim=1)  # (bs, attr_num + 1, items_max, hidden_size)
         concat_mask = torch.cat([atomic_embeddings_mask.unsqueeze(1), pooler_output_mask], dim=1)  # (bs, attr_num + 1, items_max)
 
@@ -877,37 +894,32 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         position_ids = torch.arange(1, max_position + 1, device=pooler_output.device).unsqueeze(0)  # (1, items_max)
         position_ids = position_ids.repeat(concat_output.shape[1], 1)  # (attr_num + 1, items_max)
         position_ids = position_ids.T.flatten(0, 1)  # (items_max * (attr_num + 1), )
-
         position_encoding = self.pos_encoding.forward(position_ids)  # (items_max * (attr_num + 1), hidden_size)
 
         concat_output_flattened += position_encoding.unsqueeze(0)  # (bs, items_max * (attr_num + 1), hidden_size)
 
+        # Mask
+        seq_len = concat_output_flattened.shape[1]
+        num_attr = concat_output.shape[1]  # attr_num + 1
+
+        indices = torch.arange(0, seq_len, num_attr).repeat_interleave(num_attr).reshape(1, -1)
+        attn_mask = torch.less(torch.arange(seq_len).unsqueeze(1), indices).to(self.device)
+
         attn_output = self.self_attn.forward(
-            concat_output_flattened, concat_output_flattened, concat_output_flattened, key_padding_mask=concat_mask_flattened, need_weights=False
-        )[0]  # (bs, items_max * (attr_num + 1), hidden_size)
+            # concat_output_flattened, src_key_padding_mask=key_padding_mask, mask=mask
+            concat_output_flattened, src_key_padding_mask=concat_mask_flattened, mask=attn_mask
+        )  # (bs, items_max * (attr_num + 1), hidden_size)
 
         recon = attn_output.unflatten(1, (concat_output.shape[2], concat_output.shape[1])).transpose(2, 1)  # (bs, attr_num + 1, items_max, hidden_size)
 
-        attn_item_output = recon[:, 0, :, :]  # (bs, items_max, hidden_size)
-        attn_attr_output = recon[:, 1:, :, :]  # (bs, attr_num, items_max, hidden_size)
+        attn_item_output = recon[:, 0, 0, :]  # (bs, hidden_size)
+        attn_attr_output = recon[:, 1:, 0, :]  # (bs, attr_num, hidden_size)
 
-        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight.detach()[1:].unsqueeze(1).unsqueeze(0))  # (bs, |I|, items_max)
+        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight.detach()[1:].unsqueeze(0))  # (bs, |I|, items_max)
         attr_sim = self.similarity_score(attn_attr_output)  # (bs, |I|, attr_num, items_max)
 
         scores = torch.cat([item_sim.unsqueeze(2), attr_sim], dim=2)  # (bs, |I|, attr_num + 1, items_max)
-
-        all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)  # (|I|, attr_num + 1, 1)
-        final_mask = torch.add(concat_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-        scores[final_mask] = -torch.inf
-
-        reduced_scores = reduce_session(
-            scores,
-            self.config.session_reduce_method,
-            self.config.session_reduce_topk,
-            mask=final_mask,
-            attribute_agg_method=self.config.attribute_agg_method,
-            linear_agg_module=self.linear_agg_module,
-        )
+        reduced_scores = scores.mean(dim=-1)  # (bs, |I|, attr_num + 1)
 
         if labels is None:
             return reduced_scores
