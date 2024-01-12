@@ -65,6 +65,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     model.eval()
 
     items = sorted(list(tokenized_items.items()), key=lambda x: x[0])
+    keys = [ele[0] for ele in items]
     items = [ele[1] for ele in items]
 
     item_embeddings = []

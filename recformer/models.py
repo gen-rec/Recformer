@@ -5,8 +5,8 @@ from typing import List, Union, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch import distributed
-from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
+from torch.nn.utils.rnn import pad_sequence
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
     LongformerPreTrainedModel,
@@ -50,6 +50,10 @@ class RecformerConfig(LongformerConfig):
 
         self.item_num = item_num
         self.finetune_negative_sample_size = finetune_negative_sample_size
+
+        # Attribute layer
+        self.attr_nhead = 4
+        self.attr_dropout = 0.1
 
 
 @dataclass
@@ -750,14 +754,27 @@ class RecformerForPretraining(nn.Module):
         )
 
 
+class AttributeLayer(nn.Module):
+    def __init__(self, d_model: int, nhead: int, dropout: float = 0.1):
+        super().__init__()
+
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
+
+    def forward(self, sequence: torch.Tensor, mask: torch.Tensor):
+        return self.self_attn.forward(sequence, sequence, sequence, key_padding_mask=mask, need_weights=False)[0]
+
+
 class RecformerForSeqRec(LongformerPreTrainedModel):
     def __init__(self, config: RecformerConfig):
         super().__init__(config)
 
         self.longformer = RecformerModel(config)
         self.sim = Similarity(config)
-        # Initialize weights and apply final processing
-        self.item_embedding = None
+
+        # Model and embedding for additional layer
+        self.atomic_embedding = nn.Embedding(config.item_num + 1, config.linear_out, padding_idx=0)  # +1 for padding
+        self.self_attn = nn.MultiheadAttention(config.linear_out, config.attr_nhead, dropout=config.attr_dropout, batch_first=True)
+
         self.post_init()
 
         if config.attribute_agg_method == "linear":
@@ -797,7 +814,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         return_dict: Optional[bool] = None,
         candidates: Optional[torch.Tensor] = None,  # candidate item ids
         labels: Optional[torch.Tensor] = None,  # target item ids
-    ):
+        item_seq: list[list[int]] | None = None,  # item IDs that start with 0
+    ) -> torch.Tensor:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = input_ids.size(0)
@@ -817,64 +835,59 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             return_dict=True,
         )
 
+        max_position = item_position_ids.clone()
+        max_position[max_position == 50] = 0
+        max_position = torch.max(max_position)
+
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
+        item_seq_plus_1 = [torch.tensor([s + 1 for s in seq], dtype=torch.long) for seq in item_seq]
+        item_seq_plus_1 = pad_sequence(item_seq_plus_1, batch_first=True, padding_value=0).to(pooler_output.device)  # (bs, items_max)
+        item_seq_plus_1 = item_seq_plus_1[:, :max_position]  # (bs, items_max)
+
+        atomic_embeddings = self.atomic_embedding.forward(item_seq_plus_1)  # (bs, items_max, hidden_size)
+        atomic_embeddings_mask = torch.eq(item_seq_plus_1, 0)  # (bs, items_max)
+
+        concat_output = torch.cat([atomic_embeddings.unsqueeze(1), pooler_output], dim=1)  # (bs, attr_num + 1, items_max, hidden_size)
+        concat_mask = torch.cat([atomic_embeddings_mask.unsqueeze(1), pooler_output_mask], dim=1)  # (bs, attr_num + 1, items_max)
+
+        concat_output_flattened = concat_output.transpose(1, 2).flatten(1, 2)  # (bs, items_max * (attr_num + 1), hidden_size)
+        concat_mask_flattened = concat_mask.transpose(1, 2).flatten(1, 2)  # (bs, items_max * (attr_num + 1))
+
+        attn_output = self.self_attn.forward(
+            concat_output_flattened, concat_output_flattened, concat_output_flattened, key_padding_mask=concat_mask_flattened, need_weights=False
+        )[0]  # (bs, items_max * (attr_num + 1), hidden_size)
+
+        recon = attn_output.unflatten(1, (concat_output.shape[2], concat_output.shape[1])).transpose(2, 1)  # (bs, attr_num + 1, items_max, hidden_size)
+
+        attn_item_output = recon[:, 0, :, :]  # (bs, items_max, hidden_size)
+        attn_attr_output = recon[:, 1:, :, :]  # (bs, attr_num, items_max, hidden_size)
+
+        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight.detach()[1:].unsqueeze(1).unsqueeze(0))  # (bs, |I|, items_max)
+        attr_sim = self.similarity_score(attn_attr_output)  # (bs, |I|, attr_num, items_max)
+
+        scores = torch.cat([item_sim.unsqueeze(2), attr_sim], dim=2)  # (bs, |I|, attr_num + 1, items_max)
+
+        all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)  # (|I|, attr_num + 1, 1)
+        final_mask = torch.add(concat_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+        scores[final_mask] = -torch.inf
+
+        reduced_scores = reduce_session(
+            scores,
+            self.config.session_reduce_method,
+            self.config.session_reduce_topk,
+            mask=final_mask,
+            attribute_agg_method=self.config.attribute_agg_method,
+            linear_agg_module=self.linear_agg_module,
+        )
+
         if labels is None:
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+            return reduced_scores
 
-            all_item_mask = torch.zeros(
-                (scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device
-            )  # (|I|, attr_num, 1)
-            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-            scores[final_mask] = -torch.inf
-
-            scores = reduce_session(
-                scores,
-                self.config.session_reduce_method,
-                self.config.session_reduce_topk,
-                mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
-                linear_agg_module=self.linear_agg_module,
-            )
-            return scores
-
-        loss_fct = CrossEntropyLoss()
-
-        if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
-
-            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
-            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-            scores[final_mask] = -torch.inf
-
-            scores = reduce_session(
-                scores,
-                self.config.session_reduce_method,
-                self.config.session_reduce_topk,
-                mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
-                linear_agg_module=self.linear_agg_module,
-            )
-
-            if labels.dim() == 2:
-                labels = labels.squeeze(dim=-1)
-            loss = loss_fct(scores, labels)
-
-        else:  ## using sampled softmax
-            raise NotImplementedError("Negative sampling disabled")
-            candidates = torch.cat(
-                (
-                    labels.unsqueeze(-1),
-                    torch.randint(
-                        0, self.config.item_num, size=(batch_size, self.config.finetune_negative_sample_size)
-                    ).to(labels.device),
-                ),
-                dim=-1,
-            )
-            scores = self.similarity_score(pooler_output, candidates)
-            target = torch.zeros_like(labels, device=labels.device)
-            loss = loss_fct(scores, target)
+        if labels.dim() == 2:
+            labels = labels.squeeze(dim=-1)
+        loss = cross_entropy(reduced_scores, labels)
 
         return loss
 

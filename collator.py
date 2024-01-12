@@ -240,6 +240,10 @@ class PretrainDataCollatorWithPadding:
         return result
 
 
+class IgnoreToList(list):
+    def to(self, *args, **kwargs):
+        return self
+
 @dataclass
 class FinetuneDataCollatorWithPadding:
 
@@ -272,6 +276,8 @@ class FinetuneDataCollatorWithPadding:
 
         for k, v in batch.items():
             batch[k] = torch.LongTensor(v)
+
+        batch["item_seq"] = IgnoreToList(s["items"] for s in batch_item_ids)
 
         return batch
 
@@ -345,6 +351,8 @@ class EvalDataCollatorWithPadding:
 
         for k, v in batch.items():
             batch[k] = torch.LongTensor(v)
+
+        batch["item_seq"] = IgnoreToList(s["items"] for s in batch_data)
 
         labels = torch.LongTensor(labels)
 
