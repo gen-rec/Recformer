@@ -250,9 +250,9 @@ class ItemMLMCollator():
         batch_attention_mask = []
         batch_labels = []
         for item_seq in batch_item_seq:
-            input_id_seq = []
-            attention_mask_seq = []
-            label_seq = []
+            input_id_seq = [self.tokenizer.eos_token_id]
+            attention_mask_seq = [1]
+            label_seq = [-100]
             masked_len = max(1, int(len(item_seq) * self.mlm_ratio))
             masked_item = random.sample(range(len(item_seq)), masked_len)
 
@@ -268,10 +268,17 @@ class ItemMLMCollator():
                     label_seq.extend([-100] * len(input_ids))
                 assert len(input_id_seq) == len(label_seq) == len(
                     attention_mask_seq), "input_id_seq and label_seq must have the same length."
+            input_id_seq = input_id_seq[:self.config.max_token_num-1]
+            attention_mask_seq = attention_mask_seq[:self.config.max_token_num-1]
+            label_seq = label_seq[:self.config.max_token_num-1]
 
-            batch_input_ids.append(torch.LongTensor(input_id_seq[:self.config.max_token_num]))
-            batch_attention_mask.append(torch.LongTensor(attention_mask_seq[:self.config.max_token_num]))
-            batch_labels.append(torch.LongTensor(label_seq[:self.config.max_token_num]))
+            input_id_seq.append(self.tokenizer.eos_token_id)
+            attention_mask_seq.append(1)
+            label_seq.append(-100)
+
+            batch_input_ids.append(torch.LongTensor(input_id_seq))
+            batch_attention_mask.append(torch.LongTensor(attention_mask_seq))
+            batch_labels.append(torch.LongTensor(label_seq[:self.config.max_token_num-1] ))
 
         return batch_input_ids, batch_attention_mask, batch_labels
 
@@ -398,8 +405,8 @@ def main(args):
             for step, batch in enumerate(tqdm(mlm_test_dataloader, ncols=100, desc="MLM Testing")):
                 for k, v in batch.items():
                     batch[k] = v.to(args.device)
-                loss = model(**batch)
-                epoch_losses.append(loss.item())
+                output = model(**batch)
+                epoch_losses.append(output.loss.item())
             wandb_logger.log({"mlm/test_loss": sum(epoch_losses) / len(epoch_losses)})
 
             if sum(epoch_losses) / len(epoch_losses) < best_target:
