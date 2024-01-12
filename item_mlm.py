@@ -203,7 +203,7 @@ class ItemMLMDataset(Dataset):
         return self.dataset[index]
 
 
-class ItemMLMCollator():
+class ItemMLMCollator:
     tokenizer: RecformerTokenizer
     tokenized_items: dict
     mlm_ratio: float
@@ -214,8 +214,7 @@ class ItemMLMCollator():
         batch_item_ids: list of item ids (batch_size, item ids)
         """
         batch_item_seq = self.sample_train_data(batch_item_ids)  # batch_size * item
-        batch_input_id, batch_attention_mask, batch_label_id = self.extract_features(
-            batch_item_seq)  # batch_size * item * seq_len
+        batch_input_id, batch_attention_mask, batch_label_id = self.extract_features(batch_item_seq)  # batch_size * item * seq_len
 
         padded_batch_input_id = torch.nn.utils.rnn.pad_sequence(
             batch_input_id, batch_first=True, padding_value=self.tokenizer.pad_token_id
@@ -268,6 +267,7 @@ class ItemMLMCollator():
                     label_seq.extend([-100] * len(input_ids))
                 assert len(input_id_seq) == len(label_seq) == len(
                     attention_mask_seq), "input_id_seq and label_seq must have the same length."
+
             input_id_seq = input_id_seq[:self.config.max_token_num-1]
             attention_mask_seq = attention_mask_seq[:self.config.max_token_num-1]
             label_seq = label_seq[:self.config.max_token_num-1]
@@ -278,7 +278,7 @@ class ItemMLMCollator():
 
             batch_input_ids.append(torch.LongTensor(input_id_seq))
             batch_attention_mask.append(torch.LongTensor(attention_mask_seq))
-            batch_labels.append(torch.LongTensor(label_seq[:self.config.max_token_num-1] ))
+            batch_labels.append(torch.LongTensor(label_seq))
 
         return batch_input_ids, batch_attention_mask, batch_labels
 
