@@ -892,7 +892,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         attn_item_output = recon[:, 0, :, :]  # (bs, items_max, hidden_size)
         attn_attr_output = recon[:, 1:, :, :]  # (bs, attr_num, items_max, hidden_size)
 
-        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight.detach()[1:].unsqueeze(1).unsqueeze(0))  # (bs, |I|, items_max)
+        item_sim = self.sim.forward(attn_item_output.unsqueeze(1), self.atomic_embedding.weight[1:].unsqueeze(1).unsqueeze(0))  # (bs, |I|, items_max)
         attr_sim = self.similarity_score(attn_attr_output)  # (bs, |I|, attr_num, items_max)
 
         scores = torch.cat([item_sim.unsqueeze(2), attr_sim], dim=2)  # (bs, |I|, attr_num + 1, items_max)
