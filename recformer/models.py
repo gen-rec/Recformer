@@ -51,7 +51,6 @@ class RecformerConfig(LongformerConfig):
         self.item_num = item_num
         self.finetune_negative_sample_size = finetune_negative_sample_size
 
-
 @dataclass
 class RecformerPretrainingOutput:
 
@@ -67,6 +66,7 @@ class RecformerPretrainingOutput:
 @dataclass
 class RecformerBaseModelOutputWithPooling(LongformerBaseModelOutputWithPooling):
     mask: Optional[torch.Tensor] = None
+    linear_hidden_states: Optional[torch.Tensor] = None
 
 
 def create_position_ids_from_input_ids(input_ids, padding_idx):
@@ -259,7 +259,7 @@ class RecformerPooler(nn.Module):
             # Compute the mean
             hidden_states_pooled = summed_states / valid_counts  # (bs, attr_num, items_max, hidden_size)
 
-            return hidden_states_pooled, valid_counts_eq_0.squeeze(-1)
+            return hidden_states_pooled, valid_counts_eq_0.squeeze(-1), hidden_states
 
         elif self.pooler_type == "item":
             num_items = item_position_ids.clone()
@@ -292,7 +292,7 @@ class RecformerPooler(nn.Module):
             # Compute the mean
             hidden_states_pooled = summed_states / valid_counts  # (bs, item_num, hidden_size)
 
-            return hidden_states_pooled.unsqueeze(1), valid_counts_eq_0.squeeze(-1).unsqueeze(1)
+            return hidden_states_pooled.unsqueeze(1), valid_counts_eq_0.squeeze(-1).unsqueeze(1), hidden_states
 
         elif self.pooler_type == "token":
             seq_len = hidden_states.shape[1]
@@ -302,7 +302,7 @@ class RecformerPooler(nn.Module):
             hidden_states_pooled[~mask] = torch.nan  # (bs, seq_len, hidden_size)
             hidden_states_pooled = hidden_states_pooled.unsqueeze(1)  # (bs, 1, seq_len, hidden_size)
 
-            return hidden_states_pooled, mask
+            return hidden_states_pooled, mask, hidden_states
 
         elif self.pooler_type == "cls":
             hidden_states_pooled = hidden_states[:, 0, :]  # (bs, hidden_size)
@@ -310,7 +310,7 @@ class RecformerPooler(nn.Module):
 
             return hidden_states_pooled, torch.zeros(
                 hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device
-            )
+            ), hidden_states
 
         else:
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")
@@ -512,7 +512,7 @@ class RecformerModel(LongformerPreTrainedModel):
             return_dict=return_dict,
         )
         sequence_output = encoder_outputs[0]
-        pooled_output, mask = (
+        pooled_output, mask, linear_hidden_states = (
             self.pooler.forward(
                 attention_mask=attention_mask,
                 hidden_states=sequence_output,
@@ -530,6 +530,7 @@ class RecformerModel(LongformerPreTrainedModel):
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             hidden_states=encoder_outputs.hidden_states,
+            linear_hidden_states=linear_hidden_states,
             attentions=encoder_outputs.attentions,
             global_attentions=encoder_outputs.global_attentions,
             mask=mask,
@@ -765,6 +766,10 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         else:
             self.linear_agg_module = None
 
+        self.gating_layer = nn.Sequential(
+            nn.Linear(config.hidden_size, 3, bias=False), nn.Softmax(dim=-1)
+        )
+
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
@@ -820,6 +825,9 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
+        bos_embeddings = outputs.last_hidden_state[:, 0, :]  # (bs, hidden_size)
+        weight = self.gating_layer(bos_embeddings)  # (bs, 4)
+
         if labels is None:
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
@@ -834,9 +842,13 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 self.config.session_reduce_method,
                 self.config.session_reduce_topk,
                 mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
+                attribute_agg_method="none",
                 linear_agg_module=self.linear_agg_module,
             )
+
+            scores = torch.mul(scores, weight.unsqueeze(1))  # (bs, |I|, attr_num + 1)
+            scores = scores.sum(dim=2)  # (bs, |I|)
+
             return scores
 
         loss_fct = CrossEntropyLoss()
@@ -853,9 +865,12 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 self.config.session_reduce_method,
                 self.config.session_reduce_topk,
                 mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
+                attribute_agg_method="none",
                 linear_agg_module=self.linear_agg_module,
             )
+
+            scores = torch.mul(scores, weight.unsqueeze(1))  # (bs, |I|, attr_num + 1)
+            scores = scores.sum(dim=2)  # (bs, |I|)
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
@@ -944,6 +959,8 @@ def reduce_session(
         scores = scores.max(dim=-1).values
     elif attribute_agg_method == "linear":
         scores = linear_agg_module(scores).squeeze(-1)
+    elif attribute_agg_method == "none":
+        pass
     else:
         raise ValueError("Unknown attribute aggregation method.")
 
