@@ -413,6 +413,7 @@ def main(args):
 
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(path_output / "mlm_best.pt", map_location="cpu")
+    del pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]
     print(model.load_state_dict(pretrain_ckpt, strict=False))
 
     finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
@@ -536,5 +537,4 @@ def main(args):
 
 
 if __name__ == "__main__":
-    os.environ["WANDB_MODE"] = "disabled"
     main(parse_item_mlm_args())

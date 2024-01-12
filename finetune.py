@@ -259,7 +259,6 @@ def main(args):
 
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
-    del pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]
     print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
 
