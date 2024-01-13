@@ -214,7 +214,8 @@ class ItemMLMCollator:
         batch_item_ids: list of item ids (batch_size, item ids)
         """
         batch_item_seq = self.sample_train_data(batch_item_ids)  # batch_size * item
-        batch_input_id, batch_attention_mask, batch_label_id = self.extract_features(batch_item_seq)  # batch_size * item * seq_len
+        batch_input_id, batch_attention_mask, batch_label_id = self.extract_features(
+            batch_item_seq)  # batch_size * item * seq_len
 
         padded_batch_input_id = torch.nn.utils.rnn.pad_sequence(
             batch_input_id, batch_first=True, padding_value=self.tokenizer.pad_token_id
@@ -268,9 +269,9 @@ class ItemMLMCollator:
                 assert len(input_id_seq) == len(label_seq) == len(
                     attention_mask_seq), "input_id_seq and label_seq must have the same length."
 
-            input_id_seq = input_id_seq[:self.config.max_token_num-1]
-            attention_mask_seq = attention_mask_seq[:self.config.max_token_num-1]
-            label_seq = label_seq[:self.config.max_token_num-1]
+            input_id_seq = input_id_seq[:self.config.max_token_num - 1]
+            attention_mask_seq = attention_mask_seq[:self.config.max_token_num - 1]
+            label_seq = label_seq[:self.config.max_token_num - 1]
 
             input_id_seq.append(self.tokenizer.eos_token_id)
             attention_mask_seq.append(1)
@@ -350,6 +351,22 @@ def main(args):
     mlm_collator.tokenized_items = tokenized_items
     mlm_collator.mlm_ratio = args.mlm_ratio
 
+    # dataset for Recformer
+    finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
+    eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
+
+    train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
+    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
+    test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
+
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
+    dev_loader = DataLoader(
+        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn
+    )
+    test_loader = DataLoader(
+        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
+    )
+
     mlm_train_dataset = ItemMLMDataset(mlm_train_dataset)
     mlm_test_dataset = ItemMLMDataset(mlm_test_dataset)
 
@@ -411,32 +428,30 @@ def main(args):
 
             if sum(epoch_losses) / len(epoch_losses) < best_target:
                 best_target = sum(epoch_losses) / len(epoch_losses)
-                patience = 3
                 torch.save(model.state_dict(), path_output / "mlm_best.pt")
+                patience = 3
+
             else:
                 patience -= 1
                 if patience == 0:
                     break
 
+            longformer = model.state_dict()
+            torch.save(longformer, path_output / f"mlm_{epoch + 1}epoch.pt")
+            rec_model = RecformerForSeqRec(config)
+            del longformer["longformer.embeddings.token_type_embeddings.weight"]
+            rec_model.load_state_dict(longformer, strict=False)
+            rec_model.to(args.device)
+            item_embeddings = encode_all_items(rec_model.longformer, tokenizer, tokenized_items, args)
+            rec_model.init_item_embedding(item_embeddings)
+
+            zero_shot_metrics = evaluate(rec_model, test_loader, args)
+            wandb_logger.log({f"zero-shot/{k}": v for k, v in zero_shot_metrics.items()})
+
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(path_output / "mlm_best.pt", map_location="cpu")
     del pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]
     print(model.load_state_dict(pretrain_ckpt, strict=False))
-
-    finetune_data_collator = FinetuneDataCollatorWithPadding(tokenizer, tokenized_items)
-    eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
-
-    train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
-    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
-    test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
-
-    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
-    dev_loader = DataLoader(
-        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn
-    )
-    test_loader = DataLoader(
-        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
-    )
 
     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
 
