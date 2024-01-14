@@ -389,7 +389,8 @@ def main(args):
         optimizer, num_warmup_steps=500, num_training_steps=len(mlm_train_dataloader) * args.mlm_epochs
     )
 
-    best_target = float("inf")
+    best_target = float("inf") if args.mlm_early_stop_metric == "loss" else float("-inf")
+    best_epoch = -1
     patience = 3
     for epoch in range(args.mlm_epochs):
         model.train()
@@ -426,16 +427,6 @@ def main(args):
                 epoch_losses.append(output.loss.item())
             wandb_logger.log({"mlm/test_loss": sum(epoch_losses) / len(epoch_losses)})
 
-            if sum(epoch_losses) / len(epoch_losses) < best_target:
-                best_target = sum(epoch_losses) / len(epoch_losses)
-                torch.save(model.state_dict(), path_output / "mlm_best.pt")
-                patience = 3
-
-            else:
-                patience -= 1
-                if patience == 0:
-                    break
-
             longformer = model.state_dict()
             torch.save(longformer, path_output / f"mlm_{epoch + 1}epoch.pt")
             rec_model = RecformerForSeqRec(config)
@@ -448,6 +439,29 @@ def main(args):
             zero_shot_metrics = evaluate(rec_model, test_loader, args)
             wandb_logger.log({f"zero-shot/{k}": v for k, v in zero_shot_metrics.items()})
 
+            if args.mlm_early_stop_metric == "loss":
+                current = sum(epoch_losses) / len(epoch_losses)
+            else:
+                current = zero_shot_metrics[args.mlm_early_stop_metric]
+
+            if current < best_target and args.mlm_early_stop_metric == "loss":
+                best_target = current
+                best_epoch = epoch
+                print(f"Save the best model in epoch {epoch + 1}.")
+                torch.save(model.state_dict(), path_output / "mlm_best.pt")
+                patience = 3
+            elif current > best_target and args.mlm_early_stop_metric != "loss":
+                best_target = current
+                best_epoch = epoch
+                print(f"Save the best model in epoch {epoch + 1}.")
+                torch.save(model.state_dict(), path_output / "mlm_best.pt")
+                patience = 3
+            else:
+                patience -= 1
+                if patience == 0:
+                    break
+
+    print(f"Load best model in epoch {best_epoch + 1}.")
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(path_output / "mlm_best.pt", map_location="cpu")
     del pretrain_ckpt["longformer.embeddings.token_type_embeddings.weight"]

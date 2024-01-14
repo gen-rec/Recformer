@@ -107,11 +107,12 @@ def parse_item_mlm_args():
     parser.add_argument("--mlm_weight_decay", type=float, default=0.01)
     parser.add_argument("--mlm_batch_size", type=int, default=16)
     parser.add_argument("--mlm_num_train_epochs", type=int, default=16)
+    parser.add_argument("--mlm_early_stop_metric", type=str, default="loss", choices=["loss", "NDCG@10"])
+    parser.add_argument("--mlm_early_stop_patience", type=int, default=3)
 
 
 
     # path and file
-    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
