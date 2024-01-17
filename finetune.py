@@ -39,6 +39,18 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
     config.attribute_agg_method = args.attribute_agg_method
+    config.label_smoothing = args.label_smoothing
+
+    if args.item_distance_file is not None:
+        import os
+        item_distance = torch.load(os.path.join(args.data_path, args.item_distance_file))
+        item_distance = item_distance.to(args.device)
+        item_distance = torch.sigmoid(1 - item_distance * 2)
+        item_distance = item_distance / item_distance.max()
+        config.item_distance = item_distance
+
+    else:
+        config.item_distance = None
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -187,6 +199,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 
 def main(args):
     print(args)
+    print("======== label smoothing ========")
 
     seed_everything(args.seed, workers=True)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
@@ -268,13 +281,13 @@ def main(args):
             param.requires_grad = False
 
     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
 
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
+
 
     test_metrics = evaluate(model, test_loader, args)
     if wandb_logger is not None:

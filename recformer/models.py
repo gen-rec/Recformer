@@ -5,7 +5,6 @@ from typing import List, Union, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch import distributed
-from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
@@ -714,7 +713,7 @@ class RecformerForPretraining(nn.Module):
         cos_sim = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)  # (bs, bs)
         labels = torch.arange(cos_sim.size(0), device=cos_sim.device)
 
-        ce_loss = cross_entropy(cos_sim, labels)
+        ce_loss = cross_entropy(cos_sim, labels, label_smoothing=self.config.label_smoothing)
         correct_num = torch.eq(torch.argmax(cos_sim, 1), labels).sum()
 
         if mlm_outputs_a is not None and mlm_labels_a is not None:
@@ -839,8 +838,6 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             )
             return scores
 
-        loss_fct = CrossEntropyLoss()
-
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
 
@@ -859,7 +856,24 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
-            loss = loss_fct(scores, labels)
+
+            if self.config.item_distance is None:
+                loss = cross_entropy(scores, labels, label_smoothing=self.config.label_smoothing)
+            else:
+                losses = []
+                loss_weight_per_sample = self.config.item_distance[labels].detach()  # (bs, |I|)
+
+                for batch_idx in range(batch_size):
+                    losses.append(
+                        cross_entropy(
+                            scores[batch_idx],
+                            labels[batch_idx],
+                            label_smoothing=self.config.label_smoothing,
+                            weight=loss_weight_per_sample[batch_idx],
+                        )
+                    )
+
+                loss = torch.stack(losses).mean()
 
         else:  ## using sampled softmax
             raise NotImplementedError("Negative sampling disabled")
