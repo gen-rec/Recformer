@@ -112,6 +112,7 @@ def evaluate(model, dataloader, args, return_preds=False):
 
     all_scores = []
     all_labels = []
+    gating_weights = []
 
     for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
 
@@ -120,10 +121,11 @@ def evaluate(model, dataloader, args, return_preds=False):
         labels = labels.to(args.device)
 
         with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            scores = model(**batch)  # (bs, |I|, num_attr, items_max)
+            scores, weight = model(**batch)  # (bs, |I|, num_attr, items_max)
 
         all_scores.append(scores.detach().clone().cpu())
         all_labels.append(labels.detach().clone().cpu())
+        gating_weights.append(weight.detach().clone().cpu())
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
@@ -141,11 +143,13 @@ def evaluate(model, dataloader, args, return_preds=False):
 
     average_metrics = average_meter_set.averages()
 
+    gating_weights = torch.cat(gating_weights, dim=0)
+
     if return_preds:
         all_scores = torch.cat(all_scores, dim=0)
         all_labels = torch.cat(all_labels, dim=0).squeeze()
         all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
-        return average_metrics, all_predictions, all_labels
+        return average_metrics, all_predictions, all_labels, gating_weights
 
     return average_metrics
 
@@ -351,7 +355,7 @@ def main(args):
         except FileNotFoundError:
             print("No best model in stage 2. Use the latest model.")
 
-        test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
+        test_metrics, predictions, labels, gating_weights = evaluate(model, test_loader, args, return_preds=True)
         print(f"Stage-2 Test set: {test_metrics}")
 
         if wandb_logger is not None:
@@ -362,12 +366,13 @@ def main(args):
 
         predictions = predictions.tolist()
         labels = labels.tolist()
+        gating_weights = gating_weights.tolist()
 
         output = {}
-        for user, prediction, label in zip(users, predictions, labels):
+        for user, prediction, label, weight in zip(users, predictions, labels, gating_weights):
             prediction = list(map(id2item.get, prediction))
             label = id2item[label]
-            output[user] = {"predictions": prediction, "target": label}
+            output[user] = {"predictions": prediction, "target": label, "gating_weights": weight}
 
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
 

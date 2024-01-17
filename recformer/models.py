@@ -849,7 +849,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             scores = torch.mul(scores, weight.unsqueeze(1))  # (bs, |I|, attr_num + 1)
             scores = scores.sum(dim=2)  # (bs, |I|)
 
-            return scores
+            return scores, weight
 
         loss_fct = CrossEntropyLoss()
 
