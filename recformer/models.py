@@ -766,9 +766,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         else:
             self.linear_agg_module = None
 
-        self.gating_layer = nn.Sequential(
-            nn.Linear(config.hidden_size, 3, bias=False), nn.Softmax(dim=-1)
-        )
+        self.gating_layer = nn.Linear(config.hidden_size, 3, bias=False)
+        self.gating_noise = nn.Linear(config.hidden_size, 3, bias=False)
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
@@ -827,6 +826,16 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
         bos_embeddings = outputs.last_hidden_state[:, 0, :]  # (bs, hidden_size)
         weight = self.gating_layer(bos_embeddings)  # (bs, 4)
+
+        # Noise
+        noise = torch.mul(
+            torch.randn_like(weight),
+            nn.functional.softplus(self.gating_noise(bos_embeddings)),
+        )
+
+        weight = weight + noise
+
+        weight = torch.softmax(weight, dim=-1)  # (bs, 4)
 
         if labels is None:
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
