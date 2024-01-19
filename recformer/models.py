@@ -205,7 +205,7 @@ class RecformerEmbeddings(nn.Module):
 class RecformerPooler(nn.Module):
     def __init__(self, config: RecformerConfig):
         super().__init__()
-        assert config.pooler_type in ["cls", "token", "item", "attribute"]
+        assert config.pooler_type in ["cls", "token", "item", "attribute", "attribute_one"]
 
         self.pooler_type = config.pooler_type
         self.pad_token_id = config.pad_token_id
@@ -308,6 +308,28 @@ class RecformerPooler(nn.Module):
             return hidden_states_pooled, torch.zeros(
                 hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device
             )
+
+        elif self.pooler_type == "attribute_one":
+            attr_max = attr_type_ids.max()
+            num_items = item_position_ids.clone()
+            num_items[num_items == 50] = -100
+            num_items = torch.max(num_items, dim=1).values
+            items_max = num_items.max()
+
+            attr_mask = torch.eq(
+                attr_type_ids.unsqueeze(1), torch.arange(1, attr_max + 1, device=attr_type_ids.device).reshape(1, -1, 1)
+            )  # (bs, attr_num, seq_len)
+
+            # hidden_states (bs, seq_len, hidden_size)
+
+            hidden_states_pooled = hidden_states.unsqueeze(1) * attr_mask.unsqueeze(-1)  # (bs, attr_num, seq_len, hidden_size)
+            hidden_states_pooled = hidden_states_pooled.sum(dim=2)  # (bs, attr_num, hidden_size)
+
+            hidden_states_pooled = hidden_states_pooled.unsqueeze(2)  # (bs, attr_num, 1, hidden_size)
+
+            mask = torch.zeros(hidden_states_pooled.shape[:-1], dtype=torch.bool, device=hidden_states_pooled.device)
+
+            return hidden_states_pooled, mask
 
         else:
             raise ValueError(f"pooler_type {self.pooler_type} is not supported")

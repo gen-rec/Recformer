@@ -83,8 +83,8 @@ def parse_finetune_args():
     parser.add_argument(
         "--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean", "weightedsim", "topksim"]
     )
-    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
-    parser.add_argument("--pooler_type_col", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
+    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls", "attribute_one"])
+    parser.add_argument("--pooler_type_col", type=str, default="attribute", choices=["attribute", "item", "token", "cls", "attribute_one"])
     parser.add_argument("--original_embedding", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
     parser.add_argument("--session_reduce_topk", type=int, default=None, help="topksim: topk")
@@ -178,6 +178,7 @@ class Ranker(nn.Module):
         res.append((1 - (rank / valid_length)).mean().item())  # AUC
 
         return res + [loss]
+
 def mrr(predictions: List[List[int]], targets: List[int], k: int = 10) -> float:
     scores = []
 
