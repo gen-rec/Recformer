@@ -60,6 +60,9 @@ class RecformerTokenizer(LongformerTokenizer):
         for attribute in item:
             attr_name, attr_value = attribute
 
+            if attr_name != "title":
+                continue
+
             name_tokens = self.item_tokenize(attr_name)
             value_tokens = self.item_tokenize(attr_value)
 
