@@ -1,4 +1,5 @@
 import logging
+import math
 from dataclasses import dataclass
 from typing import List, Union, Optional, Tuple
 
@@ -578,7 +579,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.sim = Similarity(config_row)
 
         # Initialize weights and apply final processing
-        self.item_embedding = None
+        self.item_embedding = nn.Parameter(torch.empty(config_row.item_num, 4, config_row.linear_out))
         self.loss_fn = CrossEntropyLoss()
 
         self.post_init()
@@ -593,9 +594,9 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         if candidates is not None:
             raise NotImplementedError("Negative sampling disabled")
 
-        candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
-        pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
-        sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
+        candidate_embeddings = self.item_embedding  # (|I|, attr_num, hidden_size)
+        pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, hidden_size)
+        sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num)
 
         return sim
 

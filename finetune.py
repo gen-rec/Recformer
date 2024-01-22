@@ -99,7 +99,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
             item_embeddings, batch_first=True, padding_value=float("nan")
         )  # (bs, max_seq_len, 1, hidden_size)
     else:
-        item_embeddings = torch.cat(item_embeddings, dim=0)  # (bs, attr_num, 1, hidden_size)
+        item_embeddings = torch.cat(item_embeddings, dim=0).squeeze(2)  # (bs, attr_num, hidden_size)
 
     return item_embeddings
 
@@ -131,8 +131,8 @@ def evaluate(model, dataloader, args, return_preds=False):
     average_metrics = {}
     for k in args.metric_ks:
         average_metrics |= {
-            f"NDCG@{k}": ndcg(all_scores, all_labels, k=k),
-            f"Recall@{k}": recall(all_scores, all_labels, k=k),
+            f"NDCG@{k}": ndcg(all_predictions, all_labels, k=k),
+            f"Recall@{k}": recall(all_predictions, all_labels, k=k),
         }
 
     if return_preds:
@@ -258,7 +258,9 @@ def main(args):
         for param in model.longformer_row.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
+    row_item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
+    col_item_embeddings = encode_all_items(model.longformer_col, tokenizer, tokenized_items, args)
+    item_embeddings = torch.cat([row_item_embeddings, col_item_embeddings], dim=1)
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
@@ -278,7 +280,9 @@ def main(args):
     patient = 5
 
     for epoch in range(args.num_train_epochs):
-        item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
+        row_item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
+        col_item_embeddings = encode_all_items(model.longformer_col, tokenizer, tokenized_items, args)
+        item_embeddings = torch.cat([row_item_embeddings, col_item_embeddings], dim=1)
         model.init_item_embedding(item_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
