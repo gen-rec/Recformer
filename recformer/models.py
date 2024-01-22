@@ -4,15 +4,12 @@ from typing import List, Union, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from torch import distributed
 from torch.nn import CrossEntropyLoss
-from torch.nn.functional import cross_entropy
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
     LongformerPreTrainedModel,
     LongformerEncoder,
     LongformerBaseModelOutputWithPooling,
-    LongformerLMHead,
 )
 
 logger = logging.getLogger(__name__)
@@ -550,220 +547,19 @@ class Similarity(nn.Module):
         return self.cos(x, y) / self.temp
 
 
-class RecformerForPretraining(nn.Module):
-    def __init__(self, config: RecformerConfig):
-        super().__init__()
-
-        self.config = config
-        self.longformer = RecformerModel(config)
-        self.lm_head = LongformerLMHead(config)
-        self.sim = Similarity(config)
-
-    def forward(
-        self,
-        input_ids_a: Optional[torch.Tensor] = None,
-        attention_mask_a: Optional[torch.Tensor] = None,
-        global_attention_mask_a: Optional[torch.Tensor] = None,
-        token_type_ids_a: Optional[torch.Tensor] = None,
-        attr_type_ids_a: Optional[torch.Tensor] = None,
-        item_position_ids_a: Optional[torch.Tensor] = None,
-        mlm_input_ids_a: Optional[torch.Tensor] = None,
-        mlm_labels_a: Optional[torch.Tensor] = None,
-        input_ids_b: Optional[torch.Tensor] = None,
-        attention_mask_b: Optional[torch.Tensor] = None,
-        global_attention_mask_b: Optional[torch.Tensor] = None,
-        token_type_ids_b: Optional[torch.Tensor] = None,
-        attr_type_ids_b: Optional[torch.Tensor] = None,
-        item_position_ids_b: Optional[torch.Tensor] = None,
-        mlm_input_ids_b: Optional[torch.Tensor] = None,
-        mlm_labels_b: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-    ):
-        batch_size = input_ids_a.size(0)
-
-        outputs_a = self.longformer.forward(
-            input_ids_a,
-            attention_mask=attention_mask_a,
-            global_attention_mask=global_attention_mask_a,
-            head_mask=head_mask,
-            token_type_ids=token_type_ids_a,
-            attr_type_ids=attr_type_ids_a,
-            position_ids=position_ids,
-            item_position_ids=item_position_ids_a,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-        )
-        outputs_b = self.longformer.forward(
-            input_ids_b,
-            attention_mask=attention_mask_b,
-            global_attention_mask=global_attention_mask_b,
-            head_mask=head_mask,
-            token_type_ids=token_type_ids_b,
-            attr_type_ids=attr_type_ids_b,
-            position_ids=position_ids,
-            item_position_ids=item_position_ids_b,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
-        )
-
-        # MLM auxiliary objective
-        mlm_outputs_a = None
-        if mlm_input_ids_a is not None:
-            mlm_outputs_a = self.longformer.forward(
-                mlm_input_ids_a,
-                attention_mask=attention_mask_a,
-                global_attention_mask=global_attention_mask_a,
-                head_mask=head_mask,
-                token_type_ids=token_type_ids_a,
-                attr_type_ids=attr_type_ids_a,
-                position_ids=position_ids,
-                item_position_ids=item_position_ids_a,
-                inputs_embeds=inputs_embeds,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=True,
-            )
-
-        mlm_outputs_b = None
-        if mlm_input_ids_b is not None:
-            mlm_outputs_b = self.longformer.forward(
-                mlm_input_ids_b,
-                attention_mask=attention_mask_b,
-                global_attention_mask=global_attention_mask_b,
-                head_mask=head_mask,
-                token_type_ids=token_type_ids_b,
-                attr_type_ids=attr_type_ids_b,
-                position_ids=position_ids,
-                item_position_ids=item_position_ids_b,
-                inputs_embeds=inputs_embeds,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=True,
-            )
-
-        z1 = outputs_a.pooler_output  # (bs, attr_num, session_max, hidden_size)
-        z2 = outputs_b.pooler_output  # (bs, attr_num, 1, hidden_size)
-
-        z1_mask = outputs_a.mask  # (bs, attr_num, session_max)
-        z2_mask = outputs_b.mask  # (bs, attr_num, 1)
-
-        # Gather all embeddings if using distributed training
-        if self.training and distributed.is_initialized():
-            # Pad z1 to (bs, attr_num, max_item_embeddings, hidden_size)
-            z1_padded = torch.empty(
-                (batch_size, z1.size(1), self.config.max_item_embeddings, z1.size(3)), device=z1.device
-            )
-            z1_padded[:, :, : z1.size(2), :] = z1
-
-            # Dummy vectors for allgather
-            z1_list = [torch.empty_like(z1_padded) for _ in range(distributed.get_world_size())]
-            z2_list = [torch.empty_like(z2) for _ in range(distributed.get_world_size())]
-
-            # Allgather
-            distributed.all_gather(tensor_list=z1_list, tensor=z1_padded.contiguous())
-            distributed.all_gather(tensor_list=z2_list, tensor=z2.contiguous())
-
-            # Since allgather results do not have gradients, we replace the
-            # current process's corresponding embeddings with original tensors
-            z1_list[distributed.get_rank()] = z1_padded
-            z2_list[distributed.get_rank()] = z2
-
-            # Get full batch embeddings: (bs x N, hidden)
-            z1 = torch.cat(z1_list, 0)
-            z2 = torch.cat(z2_list, 0)
-
-            if z1_mask is not None and z2_mask is not None:
-                z1_mask_padded = torch.ones(
-                    (batch_size, z1_mask.size(1), self.config.max_item_embeddings),
-                    dtype=torch.bool,
-                    device=z1_mask.device,
-                )
-                z1_mask_padded[:, :, : z1_mask.size(2)] = z1_mask
-
-                z1_mask_list = [torch.empty_like(z1_mask_padded) for _ in range(distributed.get_world_size())]
-                z2_mask_list = [torch.empty_like(z2_mask) for _ in range(distributed.get_world_size())]
-
-                distributed.all_gather(tensor_list=z1_mask_list, tensor=z1_mask_padded.contiguous())
-                distributed.all_gather(tensor_list=z2_mask_list, tensor=z2_mask.contiguous())
-
-                z1_mask = torch.cat(z1_mask_list, 0)
-                z2_mask = torch.cat(z2_mask_list, 0)
-
-        # z1: (bs, attr_num, items_max, hidden_size)
-        # z2: (bs, attr_num, 1, hidden_size)
-        # z1_mask: (bs, attr_num, items_max)
-        # z2_mask: (bs, attr_num, 1)
-        z1.unsqueeze_(1)  # (bs, 1, attr_num, items_max, hidden_size)
-        z2.unsqueeze_(0)  # (1, bs, attr_num, 1, hidden_size)
-        z1_mask.unsqueeze_(1)  # (bs, 1, attr_num, items_max)
-        z2_mask.unsqueeze_(0)  # (1, bs, attr_num, 1)
-
-        scores = self.sim.forward(z1, z2)  # (bs, bs, attr_num, items_max)
-
-        mask = torch.add(z1_mask, z2_mask)  # (bs, bs, attr_num, items_max)
-        scores[mask] = -torch.inf
-
-        cos_sim = reduce_session(scores, self.config.session_reduce_method, self.config.session_reduce_topk)  # (bs, bs)
-        labels = torch.arange(cos_sim.size(0), device=cos_sim.device)
-
-        ce_loss = cross_entropy(cos_sim, labels)
-        correct_num = torch.eq(torch.argmax(cos_sim, 1), labels).sum()
-
-        if mlm_outputs_a is not None and mlm_labels_a is not None:
-            mlm_labels_a = mlm_labels_a.view(-1, mlm_labels_a.size(-1))
-            prediction_scores_a = self.lm_head(mlm_outputs_a.last_hidden_state)
-            masked_lm_loss_a = cross_entropy(
-                prediction_scores_a.view(-1, self.config.vocab_size), mlm_labels_a.view(-1)
-            )
-            mlm_loss_a = self.config.mlm_weight * masked_lm_loss_a
-        else:
-            mlm_loss_a = 0
-
-        if mlm_outputs_b is not None and mlm_labels_b is not None:
-            mlm_labels_b = mlm_labels_b.view(-1, mlm_labels_b.size(-1))
-            prediction_scores_b = self.lm_head(mlm_outputs_b.last_hidden_state)
-            masked_lm_loss_b = cross_entropy(
-                prediction_scores_b.view(-1, self.config.vocab_size), mlm_labels_b.view(-1)
-            )
-            mlm_loss_b = self.config.mlm_weight * masked_lm_loss_b
-        else:
-            mlm_loss_b = 0
-
-        loss = ce_loss + mlm_loss_a + mlm_loss_b
-
-        return RecformerPretrainingOutput(
-            loss=loss,
-            logits=cos_sim,
-            cl_correct_num=correct_num,
-            cl_total_num=batch_size,
-            hidden_states=outputs_a.hidden_states,
-            attentions=outputs_a.attentions,
-            global_attentions=outputs_a.global_attentions,
-        )
-
-
 class RecformerForSeqRec(LongformerPreTrainedModel):
     def __init__(self, config: RecformerConfig):
         super().__init__(config)
 
-        self.longformer = RecformerModel(config)
+        self.longformer_row = RecformerModel(config)
+        self.longformer_col = RecformerModel(config)
         self.sim = Similarity(config)
+
         # Initialize weights and apply final processing
         self.item_embedding = None
-        self.post_init()
+        self.loss_fn = CrossEntropyLoss()
 
-        if config.attribute_agg_method == "linear":
-            self.linear_agg_module = nn.Linear(3, 1)
-        else:
-            self.linear_agg_module = None
+        self.post_init()
 
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
@@ -783,100 +579,57 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        global_attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        attr_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        item_position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        candidates: Optional[torch.Tensor] = None,  # candidate item ids
+        tokenized_row: dict[str, torch.Tensor],
+        tokenized_col: dict[str, torch.Tensor],
         labels: Optional[torch.Tensor] = None,  # target item ids
     ):
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        """
+        Each tokenized_row and tokenized_col consists of the following keys:
+            input_ids: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            global_attention_mask: Optional[torch.Tensor] = None,
+            token_type_ids: Optional[torch.Tensor] = None,
+            attr_type_ids: Optional[torch.Tensor] = None,
+            item_position_ids: Optional[torch.Tensor] = None,
+        """
+        # Row-wise forward
+        outputs_row = self.longformer_row.forward(**tokenized_row, return_dict=True)
 
-        batch_size = input_ids.size(0)
+        # Column-wise model forward
+        outputs_col = self.longformer_col.forward(**tokenized_col, return_dict=True)
 
-        outputs = self.longformer.forward(
-            input_ids,
-            attention_mask=attention_mask,
-            global_attention_mask=global_attention_mask,
-            head_mask=head_mask,
-            token_type_ids=token_type_ids,
-            attr_type_ids=attr_type_ids,
-            position_ids=position_ids,
-            item_position_ids=item_position_ids,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
+        pooler_output_row = outputs_row.pooler_output  # (bs, attr_num, items_max, hidden_size)
+        pooler_output_row_mask = outputs_row.mask  # (bs, attr_num, items_max)  Tokens with False are masked
+
+        pooler_output_col = outputs_col.pooler_output  # (bs, attr_num, items_max, hidden_size)
+        pooler_output_col_mask = outputs_col.mask  # (bs, attr_num, items_max)  Tokens with False are masked
+
+        scores = self.similarity_score(pooler_output_row)  # (bs, |I|, attr_num, items_max)
+
+        # TODO
+        all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+        final_mask = torch.add(pooler_output_row_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+        scores[final_mask] = -torch.inf
+
+        scores = reduce_session(
+            scores,
+            self.config.session_reduce_method,
+            self.config.session_reduce_topk,
+            mask=final_mask,
+            attribute_agg_method=self.config.attribute_agg_method,
         )
+        # TODO
 
-        pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
-        pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
+        # scores: (bs, |I|)
+        # labels: (bs, )
+
+        if labels.dim() == 2:
+            labels = labels.squeeze(dim=-1)
 
         if labels is None:
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
-
-            all_item_mask = torch.zeros(
-                (scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device
-            )  # (|I|, attr_num, 1)
-            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-            scores[final_mask] = -torch.inf
-
-            scores = reduce_session(
-                scores,
-                self.config.session_reduce_method,
-                self.config.session_reduce_topk,
-                mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
-                linear_agg_module=self.linear_agg_module,
-            )
             return scores
-
-        loss_fct = CrossEntropyLoss()
-
-        if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
-
-            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
-            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-            scores[final_mask] = -torch.inf
-
-            scores = reduce_session(
-                scores,
-                self.config.session_reduce_method,
-                self.config.session_reduce_topk,
-                mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
-                linear_agg_module=self.linear_agg_module,
-            )
-
-            if labels.dim() == 2:
-                labels = labels.squeeze(dim=-1)
-            loss = loss_fct(scores, labels)
-
-        else:  ## using sampled softmax
-            raise NotImplementedError("Negative sampling disabled")
-            candidates = torch.cat(
-                (
-                    labels.unsqueeze(-1),
-                    torch.randint(
-                        0, self.config.item_num, size=(batch_size, self.config.finetune_negative_sample_size)
-                    ).to(labels.device),
-                ),
-                dim=-1,
-            )
-            scores = self.similarity_score(pooler_output, candidates)
-            target = torch.zeros_like(labels, device=labels.device)
-            loss = loss_fct(scores, target)
-
-        return loss
+        else:
+            return self.loss_fn(scores, labels)
 
 
 def reduce_session(
@@ -886,7 +639,6 @@ def reduce_session(
     session_reduce_weightedsim_temp: float = 0.05,
     mask: torch.Tensor | None = None,
     attribute_agg_method: str = "mean",
-    linear_agg_module: nn.Module | None = None,
 ):
     """
     Mask tensor: True to mask
@@ -942,8 +694,6 @@ def reduce_session(
         scores = scores.mean(dim=-1)
     elif attribute_agg_method == "max":
         scores = scores.max(dim=-1).values
-    elif attribute_agg_method == "linear":
-        scores = linear_agg_module(scores).squeeze(-1)
     else:
         raise ValueError("Unknown attribute aggregation method.")
 

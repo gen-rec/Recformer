@@ -14,12 +14,10 @@ from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPaddin
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
-from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
+from utils import load_data, parse_finetune_args, ndcg, recall
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
-
-SERVER_URL = "http://129.154.54.103:8080"
 
 
 def load_config_tokenizer(args, item2id):
@@ -38,7 +36,6 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_topk = args.session_reduce_topk
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
-    config.attribute_agg_method = args.attribute_agg_method
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -61,6 +58,7 @@ def _par_tokenize_doc(doc):
     return item_id, input_ids, token_type_ids, attr_type_ids
 
 
+@torch.no_grad()
 def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
     model.eval()
 
@@ -69,30 +67,28 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
     item_embeddings = []
 
-    with torch.no_grad():
-        for i in tqdm(
-            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-            ncols=100,
-            desc="Encode all items",
-        ):
+    for i in tqdm(
+        range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+        ncols=100,
+        desc="Encode all items",
+    ):
+        item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
-            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+        inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
-            inputs = tokenizer.batch_encode(item_batch, encode_item=False)
+        for k, v in inputs.items():
+            inputs[k] = torch.LongTensor(v).to(args.device)
 
-            for k, v in inputs.items():
-                inputs[k] = torch.LongTensor(v).to(args.device)
+        outputs = model(**inputs)
 
-            outputs = model(**inputs)
-
-            if args.pooler_type != "token":
-                item_embeddings.append(outputs.pooler_output.detach())
-            else:
-                pooler_output = outputs.pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
-                pooler_output = pooler_output.permute(0, 2, 1, 3)  # (bs, max_seq_len, 1, hidden_size)
-                for j in range(pooler_output.shape[0]):
-                    output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
-                    item_embeddings.append(output_)
+        if args.pooler_type != "token":
+            item_embeddings.append(outputs.pooler_output.detach())
+        else:
+            pooler_output = outputs.pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
+            pooler_output = pooler_output.permute(0, 2, 1, 3)  # (bs, max_seq_len, 1, hidden_size)
+            for j in range(pooler_output.shape[0]):
+                output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
+                item_embeddings.append(output_)
 
     if args.pooler_type == "token":
         item_embeddings = torch.nn.utils.rnn.pad_sequence(
@@ -107,14 +103,10 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 def evaluate(model, dataloader, args, return_preds=False):
     model.eval()
 
-    ranker = Ranker(args.metric_ks)
-    average_meter_set = AverageMeterSet()
-
     all_scores = []
     all_labels = []
 
     for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
-
         for k, v in batch.items():
             batch[k] = v.to(args.device)
         labels = labels.to(args.device)
@@ -127,25 +119,20 @@ def evaluate(model, dataloader, args, return_preds=False):
 
         assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
-        res = ranker(scores, labels)
+    all_scores = torch.cat(all_scores, dim=0)
+    all_predictions = all_scores.topk(k=50, dim=1).indices.tolist()
+    all_scores = all_scores.tolist()
+    all_labels = torch.cat(all_labels, dim=0).squeeze().tolist()
 
-        metrics = {}
-        for i, k in enumerate(args.metric_ks):
-            metrics["NDCG@%d" % k] = res[2 * i]
-            metrics["Recall@%d" % k] = res[2 * i + 1]
-        metrics["MRR"] = res[-3]
-        metrics["AUC"] = res[-2]
-
-        for k, v in metrics.items():
-            average_meter_set.update(k, v)
-
-    average_metrics = average_meter_set.averages()
+    average_metrics = {}
+    for k in args.metric_ks:
+        average_metrics |= {
+            f"NDCG@{k}": ndcg(all_scores, all_labels, k=k),
+            f"Recall@{k}": recall(all_scores, all_labels, k=k),
+        }
 
     if return_preds:
-        all_scores = torch.cat(all_scores, dim=0)
-        all_labels = torch.cat(all_labels, dim=0).squeeze()
-        all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
-        return average_metrics, all_predictions, all_labels
+        return average_metrics, all_scores, all_predictions, all_labels
 
     return average_metrics
 
@@ -264,11 +251,10 @@ def main(args):
 
     if args.fix_word_embedding:
         print("Fix word embeddings.")
-        for param in model.longformer.embeddings.word_embeddings.parameters():
+        for param in model.longformer_row.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
+    item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
@@ -288,29 +274,27 @@ def main(args):
     patient = 5
 
     for epoch in range(args.num_train_epochs):
-
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+        item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
-        if (epoch + 1) % args.verbose == 0:
-            dev_metrics = evaluate(model, dev_loader, args)
-            print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+        dev_metrics = evaluate(model, dev_loader, args)
+        print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
-            if wandb_logger is not None:
-                wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
+        if wandb_logger is not None:
+            wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
 
-            if dev_metrics["NDCG@10"] > best_target:
-                print("Save the best model.")
-                best_target = dev_metrics["NDCG@10"]
-                patient = 5
-                torch.save(model.state_dict(), path_output / "stage_1_best.pt")
+        if dev_metrics["NDCG@10"] > best_target:
+            print("Save the best model.")
+            best_target = dev_metrics["NDCG@10"]
+            patient = 5
+            torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
-            else:
-                patient -= 1
-                if patient == 0:
-                    break
+        else:
+            patient -= 1
+            if patient == 0:
+                break
 
     print("Load best model in stage 1.")
     model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
@@ -324,26 +308,24 @@ def main(args):
         patient = 3
 
         for epoch in range(args.num_train_epochs):
-
             train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
-            if (epoch + 1) % args.verbose == 0:
-                dev_metrics = evaluate(model, dev_loader, args)
-                print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+            dev_metrics = evaluate(model, dev_loader, args)
+            print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
-                if wandb_logger is not None:
-                    wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
+            if wandb_logger is not None:
+                wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
-                if dev_metrics["NDCG@10"] > best_target:
-                    print("Save the best model.")
-                    best_target = dev_metrics["NDCG@10"]
-                    patient = 3
-                    torch.save(model.state_dict(), path_output / "stage_2_best.pt")
+            if dev_metrics["NDCG@10"] > best_target:
+                print("Save the best model.")
+                best_target = dev_metrics["NDCG@10"]
+                patient = 3
+                torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
-                else:
-                    patient -= 1
-                    if patient == 0:
-                        break
+            else:
+                patient -= 1
+                if patient == 0:
+                    break
 
         print("Load best model in stage 2.")
         try:
@@ -351,7 +333,7 @@ def main(args):
         except FileNotFoundError:
             print("No best model in stage 2. Use the latest model.")
 
-        test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
+        test_metrics, scores, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
         print(f"Stage-2 Test set: {test_metrics}")
 
         if wandb_logger is not None:
@@ -360,9 +342,6 @@ def main(args):
         users = list(map(int, test.keys()))
         users = list(map(id2user.get, users))
 
-        predictions = predictions.tolist()
-        labels = labels.tolist()
-
         output = {}
         for user, prediction, label in zip(users, predictions, labels):
             prediction = list(map(id2item.get, prediction))
@@ -370,21 +349,7 @@ def main(args):
             output[user] = {"predictions": prediction, "target": label}
 
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
-
-        # Send to http
-        # send_http(args, output, random_word)
-
-
-def send_http(args, output, run_name):
-    import requests
-    data = json.dumps(output).encode("utf-8")
-    file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
-    headers = {"Content-Type": "application/json", "File-Name": file_name}
-    response = requests.post(SERVER_URL, data=data, headers=headers)
-    if response.status_code == 200:
-        print("Send to server successfully.")
-    else:
-        print("Send to server failed.")
+        torch.save(scores, path_output / "scores.pt")
 
 
 if __name__ == "__main__":

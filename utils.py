@@ -1,7 +1,9 @@
 import json
 import os
 from argparse import ArgumentParser
+from math import log2
 from pathlib import Path
+from typing import List
 
 import torch
 import torch.nn as nn
@@ -90,7 +92,6 @@ def parse_finetune_args():
     parser.add_argument("--encode_item_batch_size_multiplier", type=int, default=4)
     parser.add_argument("--random_word", type=str, default=None)
     parser.add_argument("--zero_shot_only", action="store_true")
-    parser.add_argument("--attribute_agg_method", type=str, default="mean")
     return parser.parse_args()
 
 
@@ -176,3 +177,39 @@ class Ranker(nn.Module):
         res.append((1 - (rank / valid_length)).mean().item())  # AUC
 
         return res + [loss]
+def mrr(predictions: List[List[int]], targets: List[int], k: int = 10) -> float:
+    scores = []
+
+    for prediction, target in zip(predictions, targets):
+        if target not in prediction[:k]:
+            scores.append(0)
+            continue
+
+        scores.append(1 / (prediction[:k].index(target) + 1))
+
+    return sum(scores) / len(scores)
+
+
+def recall(predictions: List[List[int]], targets: List[int], k: int = 10) -> float:
+    scores = []
+
+    for prediction, target in zip(predictions, targets):
+        if target in prediction[:k]:
+            scores.append(1)
+        else:
+            scores.append(0)
+
+    return sum(scores) / len(scores)
+
+
+def ndcg(predictions: List[List[int]], targets: List[int], k: int = 10) -> float:
+    scores = []
+
+    for prediction, target in zip(predictions, targets):
+        if target not in prediction[:k]:
+            scores.append(0)
+            continue
+
+        scores.append(1 / log2(prediction[:k].index(target) + 2))
+
+    return sum(scores) / len(scores)

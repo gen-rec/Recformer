@@ -8,6 +8,23 @@ import unicodedata
 from recformer import RecformerTokenizer
 
 
+class TensorDict(dict):
+    def to(self, device):
+        for k, v in self.items():
+            if isinstance(v, torch.Tensor):
+                self[k] = v.to(device)
+        return self
+
+
+def _convert_dict_to_tensor(batch):
+    result = TensorDict()
+
+    for k, v in batch.items():
+        result[k] = torch.LongTensor(v)
+
+    return result
+
+
 # Data collator
 @dataclass
 class PretrainDataCollatorWithPadding:
@@ -267,11 +284,15 @@ class FinetuneDataCollatorWithPadding:
         batch_item_seq, labels = self.sample_train_data(batch_item_ids)
         batch_feature = self.extract_features(batch_item_seq)
         batch_encode_features = self.encode_features(batch_feature)
-        batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
-        batch["labels"] = labels
 
-        for k, v in batch.items():
-            batch[k] = torch.LongTensor(v)
+        row_batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
+        col_batch = _convert_to_column_wise(row_batch)
+
+        batch = {
+            "tokenized_row": _convert_dict_to_tensor(row_batch),
+            "tokenized_col": _convert_dict_to_tensor(col_batch),
+            "labels": torch.tensor(labels),
+        }
 
         return batch
 
@@ -341,14 +362,16 @@ class EvalDataCollatorWithPadding:
         batch_item_seq, labels = self.prepare_eval_data(batch_data)
         batch_feature = self.extract_features(batch_item_seq)
         batch_encode_features = self.encode_features(batch_feature)
-        batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
 
-        for k, v in batch.items():
-            batch[k] = torch.LongTensor(v)
+        row_batch = self.tokenizer.padding(batch_encode_features, pad_to_max=False)
+        col_batch = _convert_to_column_wise(row_batch)
 
-        labels = torch.LongTensor(labels)
+        batch = {
+            "tokenized_row": _convert_dict_to_tensor(row_batch),
+            "tokenized_col": _convert_dict_to_tensor(col_batch),
+        }
 
-        return batch, labels
+        return batch, torch.tensor(labels)
 
     def prepare_eval_data(self, batch_data):
 
@@ -385,3 +408,58 @@ class EvalDataCollatorWithPadding:
             features.append(self.tokenizer.encode(feature, encode_item=False))
 
         return features
+
+
+def _convert_to_column_wise(batch):
+    new_batch = {
+        "input_ids": [],
+        "item_position_ids": [],
+        "token_type_ids": [],
+        "attention_mask": batch["attention_mask"],
+        "global_attention_mask": batch["global_attention_mask"],
+        "attr_type_ids": [],
+    }
+
+    input_ids = batch["input_ids"]
+    item_position_ids = batch["item_position_ids"]
+    token_type_ids = batch["token_type_ids"]
+    attr_type_ids = batch["attr_type_ids"]
+
+    max_attr = max(batch["attr_type_ids"][0])
+    batch_size = len(batch["input_ids"])
+    seq_len = len(batch["input_ids"][0])
+
+    for i in range(batch_size):
+        batch_input_ids = [[input_ids[i][0]]] + [[] for _ in range(max_attr + 1)]
+        batch_item_position_ids = [[item_position_ids[i][0]]] + [[] for _ in range(max_attr + 1)]
+        batch_token_type_ids = [[token_type_ids[i][0]]] + [[] for _ in range(max_attr + 1)]
+        batch_attr_type_ids = [[attr_type_ids[i][0]]] + [[] for _ in range(max_attr + 1)]
+
+        for j in range(1, seq_len):
+            attr = attr_type_ids[i][j]
+
+            if attr == 0:
+                attr = -1
+
+            batch_input_ids[attr].append(input_ids[i][j])
+            batch_item_position_ids[attr].append(item_position_ids[i][j])
+            batch_token_type_ids[attr].append(token_type_ids[i][j])
+            batch_attr_type_ids[attr].append(attr_type_ids[i][j])
+
+        concat_input_ids = []
+        concat_item_position_ids = []
+        concat_token_type_ids = []
+        concat_attr_type_ids = []
+
+        for attr in range(max_attr + 2):
+            concat_input_ids += batch_input_ids[attr]
+            concat_item_position_ids += batch_item_position_ids[attr]
+            concat_token_type_ids += batch_token_type_ids[attr]
+            concat_attr_type_ids += batch_attr_type_ids[attr]
+
+        new_batch["input_ids"].append(concat_input_ids)
+        new_batch["item_position_ids"].append(concat_item_position_ids)
+        new_batch["token_type_ids"].append(concat_token_type_ids)
+        new_batch["attr_type_ids"].append(concat_attr_type_ids)
+
+    return new_batch
