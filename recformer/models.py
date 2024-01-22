@@ -579,7 +579,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.sim = Similarity(config_row)
 
         # Initialize weights and apply final processing
-        self.item_embedding = nn.Parameter(torch.empty(config_row.item_num, 4, config_row.linear_out))
+        self.item_embedding = nn.Parameter(torch.empty(config_row.item_num, 3, config_row.linear_out))
         self.loss_fn = CrossEntropyLoss()
 
         self.post_init()

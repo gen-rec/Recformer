@@ -45,7 +45,6 @@ def load_config_tokenizer(args, item2id):
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
-
     if args.session_reduce_method == "weightedsim" and args.session_reduce_weightedsim_temp is None:
         raise ValueError("session_reduce_weightedsim_temp must be specified when session_reduce_method is weightedsim.")
     if args.session_reduce_method == "topksim" and args.session_reduce_topk is None:
@@ -72,11 +71,11 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     item_embeddings = []
 
     for i in tqdm(
-        range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-        ncols=100,
-        desc="Encode all items",
+            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+            ncols=100,
+            desc="Encode all items",
     ):
-        item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+        item_batch = [[item] for item in items[i: i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
         inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
@@ -177,6 +176,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 
 
 def main(args):
+    print("\n\n\n > Attribute Attention Branch!!!!\n\n > 준영아 파이팅!!!!\n\n\n\n")
     print(args)
 
     seed_everything(args.seed, workers=True)
@@ -258,9 +258,7 @@ def main(args):
         for param in model.longformer_row.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    row_item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
-    col_item_embeddings = encode_all_items(model.longformer_col, tokenizer, tokenized_items, args)
-    item_embeddings = torch.cat([row_item_embeddings, col_item_embeddings], dim=1)
+    item_embeddings = encode_all_items(model.longformer_col, tokenizer, tokenized_items, args)
     model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
@@ -280,9 +278,7 @@ def main(args):
     patient = 5
 
     for epoch in range(args.num_train_epochs):
-        row_item_embeddings = encode_all_items(model.longformer_row, tokenizer, tokenized_items, args)
-        col_item_embeddings = encode_all_items(model.longformer_col, tokenizer, tokenized_items, args)
-        item_embeddings = torch.cat([row_item_embeddings, col_item_embeddings], dim=1)
+        item_embeddings = encode_all_items(model.longformer_col, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
