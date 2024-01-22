@@ -84,6 +84,7 @@ def parse_finetune_args():
         "--session_reduce_method", type=str, default="maxsim", choices=["maxsim", "mean", "weightedsim", "topksim"]
     )
     parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
+    parser.add_argument("--pooler_type_col", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
     parser.add_argument("--original_embedding", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
     parser.add_argument("--session_reduce_topk", type=int, default=None, help="topksim: topk")

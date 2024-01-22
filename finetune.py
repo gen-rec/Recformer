@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
@@ -21,23 +22,26 @@ tokenizer_glb: RecformerTokenizer = None
 
 
 def load_config_tokenizer(args, item2id):
-    config = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config.max_attr_num = 3
-    config.max_attr_length = 32
-    config.max_item_embeddings = 51
-    config.attention_window = [64] * 12
-    config.max_token_num = 1024
-    config.item_num = len(item2id)
-    config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    config.session_reduce_method = args.session_reduce_method
-    config.pooler_type = args.pooler_type
-    config.original_embedding = args.original_embedding
-    config.global_attention_type = args.global_attention_type
-    config.session_reduce_topk = args.session_reduce_topk
-    config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
-    config.linear_out = args.linear_out
+    config_row = RecformerConfig.from_pretrained(args.model_name_or_path)
+    config_row.max_attr_num = 3
+    config_row.max_attr_length = 32
+    config_row.max_item_embeddings = 51
+    config_row.attention_window = [64] * 12
+    config_row.max_token_num = 1024
+    config_row.item_num = len(item2id)
+    config_row.finetune_negative_sample_size = args.finetune_negative_sample_size
+    config_row.session_reduce_method = args.session_reduce_method
+    config_row.original_embedding = args.original_embedding
+    config_row.global_attention_type = args.global_attention_type
+    config_row.session_reduce_topk = args.session_reduce_topk
+    config_row.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
+    config_row.linear_out = args.linear_out
+    config_row.pooler_type = args.pooler_type
 
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    config_col = deepcopy(config_row)
+    config_col.pooler_type = args.pooler_type_col
+
+    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config_row)
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
@@ -47,7 +51,7 @@ def load_config_tokenizer(args, item2id):
     if args.session_reduce_method == "topksim" and args.session_reduce_topk is None:
         raise ValueError("session_reduce_topk must be specified when session_reduce_method is topksim.")
 
-    return config, tokenizer
+    return config_row, config_col, tokenizer
 
 
 def _par_tokenize_doc(doc):
@@ -179,7 +183,7 @@ def main(args):
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item, user2id, id2user = load_data(args)
-    config, tokenizer = load_config_tokenizer(args, item2id)
+    config_row, config_col, tokenizer = load_config_tokenizer(args, item2id)
     global tokenizer_glb
     tokenizer_glb = tokenizer
 
@@ -244,7 +248,7 @@ def main(args):
         test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
     )
 
-    model = RecformerForSeqRec(config)
+    model = RecformerForSeqRec(config_row, config_col)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
     print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)

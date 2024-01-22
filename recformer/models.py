@@ -548,12 +548,12 @@ class Similarity(nn.Module):
 
 
 class RecformerForSeqRec(LongformerPreTrainedModel):
-    def __init__(self, config: RecformerConfig):
-        super().__init__(config)
+    def __init__(self, config_row: RecformerConfig, config_col: RecformerConfig):
+        super().__init__(config_row)
 
-        self.longformer_row = RecformerModel(config)
-        self.longformer_col = RecformerModel(config)
-        self.sim = Similarity(config)
+        self.longformer_row = RecformerModel(config_row)
+        self.longformer_col = RecformerModel(config_col)
+        self.sim = Similarity(config_row)
 
         # Initialize weights and apply final processing
         self.item_embedding = None
@@ -604,20 +604,18 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         pooler_output_col = outputs_col.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_col_mask = outputs_col.mask  # (bs, attr_num, items_max)  Tokens with False are masked
 
-        scores = self.similarity_score(pooler_output_row)  # (bs, |I|, attr_num, items_max)
-
-        # TODO
-        all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
-        final_mask = torch.add(pooler_output_row_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-        scores[final_mask] = -torch.inf
-
-        scores = reduce_session(
-            scores,
-            self.config.session_reduce_method,
-            self.config.session_reduce_topk,
-            mask=final_mask,
-            attribute_agg_method=self.config.attribute_agg_method,
-        )
+        # TODO: Create scores
+        # all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+        # final_mask = torch.add(pooler_output_row_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+        # scores[final_mask] = -torch.inf
+        #
+        # scores = reduce_session(
+        #     scores,
+        #     self.config.session_reduce_method,
+        #     self.config.session_reduce_topk,
+        #     mask=final_mask,
+        #     attribute_agg_method=self.config.attribute_agg_method,
+        # )
         # TODO
 
         # scores: (bs, |I|)
