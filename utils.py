@@ -58,6 +58,7 @@ def parse_finetune_args():
     parser.add_argument("--user2id_file", type=str, default="umap.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
+    parser.add_argument("--max_attr_num", type=int, default=3)
     # data process
     parser.add_argument(
         "--preprocessing_num_workers", type=int, default=8, help="The number of processes to use for the preprocessing."

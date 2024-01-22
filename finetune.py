@@ -23,7 +23,7 @@ tokenizer_glb: RecformerTokenizer = None
 
 def load_config_tokenizer(args, item2id):
     config_row = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config_row.max_attr_num = 3
+    config_row.max_attr_num = args.max_attr_num
     config_row.max_attr_length = 32
     config_row.max_item_embeddings = 51
     config_row.attention_window = [64] * 12
