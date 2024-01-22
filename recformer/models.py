@@ -643,13 +643,13 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         # scores: (bs, |I|)
         # labels: (bs, )
 
+        if labels is None:
+            return scores
+
         if labels.dim() == 2:
             labels = labels.squeeze(dim=-1)
 
-        if labels is None:
-            return scores
-        else:
-            return self.loss_fn(scores, labels)
+        return self.loss_fn(scores, labels)
 
 
 def reduce_session(
