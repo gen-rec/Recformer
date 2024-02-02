@@ -66,6 +66,7 @@ def parse_finetune_args():
     parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
 
     # train
+    parser.add_argument("--early_stop_metric", type=str, default="NDCG@10", help="Metric for early stopping.")
     parser.add_argument("--num_train_epochs", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)

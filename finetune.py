@@ -301,9 +301,9 @@ def main(args):
             if wandb_logger is not None:
                 wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
 
-            if dev_metrics["NDCG@10"] > best_target:
+            if dev_metrics[args.early_stop_metric] > best_target:
                 print("Save the best model.")
-                best_target = dev_metrics["NDCG@10"]
+                best_target = dev_metrics[args.early_stop_metric]
                 patient = 5
                 torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
@@ -334,9 +334,9 @@ def main(args):
                 if wandb_logger is not None:
                     wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
-                if dev_metrics["NDCG@10"] > best_target:
+                if dev_metrics[args.early_stop_metric] > best_target:
                     print("Save the best model.")
-                    best_target = dev_metrics["NDCG@10"]
+                    best_target = dev_metrics[args.early_stop_metric]
                     patient = 3
                     torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
