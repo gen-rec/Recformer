@@ -184,6 +184,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
     if wandb_logger is not None:
         wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
 
+    return sum(epoch_losses) / len(epoch_losses)
+
 
 def main(args):
     print(args)
@@ -292,7 +294,7 @@ def main(args):
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
+        loss = train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = evaluate(model, dev_loader, args)
@@ -301,16 +303,31 @@ def main(args):
             if wandb_logger is not None:
                 wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
 
-            if dev_metrics[args.early_stop_metric] > best_target:
-                print("Save the best model.")
-                best_target = dev_metrics[args.early_stop_metric]
-                patient = 5
-                torch.save(model.state_dict(), path_output / "stage_1_best.pt")
+            if args.early_stop_metric == "loss":
+                if loss < best_target:
+                    print("Save the best model.")
+                    best_target = loss
+                    patient = 5
+                    torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
+                else:
+                    patient -= 1
+                    if patient == 0:
+                        break
+
+            elif args.early_stop_metric in dev_metrics:
+                if dev_metrics[args.early_stop_metric] > best_target:
+                    print("Save the best model.")
+                    best_target = dev_metrics[args.early_stop_metric]
+                    patient = 5
+                    torch.save(model.state_dict(), path_output / "stage_1_best.pt")
+
+                else:
+                    patient -= 1
+                    if patient == 0:
+                        break
             else:
-                patient -= 1
-                if patient == 0:
-                    break
+                raise ValueError("Unknown early stop metric.")
 
     print("Load best model in stage 1.")
     model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
@@ -325,7 +342,7 @@ def main(args):
 
         for epoch in range(args.num_train_epochs):
 
-            train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
+            loss = train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
                 dev_metrics = evaluate(model, dev_loader, args)
@@ -334,16 +351,31 @@ def main(args):
                 if wandb_logger is not None:
                     wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
-                if dev_metrics[args.early_stop_metric] > best_target:
-                    print("Save the best model.")
-                    best_target = dev_metrics[args.early_stop_metric]
-                    patient = 3
-                    torch.save(model.state_dict(), path_output / "stage_2_best.pt")
+                if args.early_stop_metric == "loss":
+                    if loss < best_target:
+                        print("Save the best model.")
+                        best_target = loss
+                        patient = 5
+                        torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
+                    else:
+                        patient -= 1
+                        if patient == 0:
+                            break
+
+                elif args.early_stop_metric in dev_metrics:
+                    if dev_metrics[args.early_stop_metric] > best_target:
+                        print("Save the best model.")
+                        best_target = dev_metrics[args.early_stop_metric]
+                        patient = 5
+                        torch.save(model.state_dict(), path_output / "stage_2_best.pt")
+
+                    else:
+                        patient -= 1
+                        if patient == 0:
+                            break
                 else:
-                    patient -= 1
-                    if patient == 0:
-                        break
+                    raise ValueError("Unknown early stop metric.")
 
         print("Load best model in stage 2.")
         try:
