@@ -286,7 +286,7 @@ def main(args):
     if args.zero_shot_only:
         return
 
-    best_target = float("-inf")
+    best_target = float("-inf") if args.early_stop_metric != "loss" else float("inf")
     patient = 5
 
     for epoch in range(args.num_train_epochs):
