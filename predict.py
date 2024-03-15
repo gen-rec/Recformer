@@ -315,7 +315,7 @@ def main():
 
     if args.fix_word_embedding:
         print("Fix word embeddings.")
-        for param in model.longformer.embeddings.word_embeddings.parameters():
+        for param in model.lm.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
     model.to(args.device)  # send item embeddings to device

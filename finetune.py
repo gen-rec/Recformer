@@ -13,7 +13,7 @@ from wonderwords import RandomWord
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
+from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig, BERTForSeqRec
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
@@ -24,11 +24,7 @@ SERVER_URL = "http://129.154.54.103:8080"
 
 def load_config_tokenizer(args, item2id):
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config.max_attr_num = 3
-    config.max_attr_length = 32
-    config.max_item_embeddings = 51
-    config.attention_window = [64] * 12
-    config.max_token_num = 1024
+    config.model_name_or_path = args.model_name_or_path
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.session_reduce_method = args.session_reduce_method
@@ -219,7 +215,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="WWW-Rebuttal",
+        project="AfterSIGIR",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
@@ -257,17 +253,21 @@ def main(args):
         test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
     )
 
-    model = RecformerForSeqRec(config)
-    pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
-    print(model.load_state_dict(pretrain_ckpt, strict=False))
-    model.to(args.device)
+    if 'longformer' in args.model_name_or_path:
+        model = RecformerForSeqRec(config)
+        pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
+        print(model.load_state_dict(pretrain_ckpt, strict=False))
+        model.to(args.device)
+    elif 'bert' in args.model_name_or_path:
+        model = BERTForSeqRec(config)
+        model.to(args.device)
 
     if args.fix_word_embedding:
         print("Fix word embeddings.")
-        for param in model.longformer.embeddings.word_embeddings.parameters():
+        for param in model.lm.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    item_embeddings = encode_all_items(model.lm, tokenizer, tokenized_items, args)
 
     model.init_item_embedding(item_embeddings)
 
@@ -289,7 +289,7 @@ def main(args):
 
     for epoch in range(args.num_train_epochs):
 
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+        item_embeddings = encode_all_items(model.lm, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)

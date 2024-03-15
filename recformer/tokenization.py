@@ -53,7 +53,7 @@ class RecformerTokenizer(LongformerTokenizer):
     def encode_item(self, item):
 
         input_ids = []
-        token_type_ids = []
+        token_type_ids = []  # 1 for name, 2 for value
         attr_type = []  # 1 for title, 2 for brand, etc.  0 is ignored
         item = list(item.items())[: self.config.max_attr_num]  # truncate attribute number
 
@@ -119,21 +119,20 @@ class RecformerTokenizer(LongformerTokenizer):
         attr_type_ids += [0]
 
         attention_mask = [1] * len(input_ids)
-        if self.config.global_attention_type == "cls":
-            global_attention_mask = [0] * len(input_ids)
-            global_attention_mask[0] = 1
-        elif self.config.global_attention_type == "attribute":
-            global_attention_mask = [1 if a != 2 else 0 for a in token_type_ids]  # 0 for bos, 1 for type, 2 for value
-            assert len(global_attention_mask) == len(input_ids)
-        else:
-            raise ValueError("Unknown global attention type.")
+        # if self.config.global_attention_type == "cls":
+        #     global_attention_mask = [0] * len(input_ids)
+        #     global_attention_mask[0] = 1
+        # elif self.config.global_attention_type == "attribute":
+        #     global_attention_mask = [1 if a != 2 else 0 for a in token_type_ids]  # 0 for bos, 1 for type, 2 for value
+        #     assert len(global_attention_mask) == len(input_ids)
+        # else:
+        #     raise ValueError("Unknown global attention type.")
 
         return {
             "input_ids": input_ids,
             "item_position_ids": item_position_ids,
             "token_type_ids": token_type_ids,
             "attention_mask": attention_mask,
-            "global_attention_mask": global_attention_mask,
             "attr_type_ids": attr_type_ids,
         }
 
@@ -148,7 +147,6 @@ class RecformerTokenizer(LongformerTokenizer):
         batch_item_position_ids = []
         batch_token_type_ids = []
         batch_attention_mask = []
-        batch_global_attention_mask = []
         batch_attr_type_ids = []
 
         for items in item_batch:
@@ -156,7 +154,6 @@ class RecformerTokenizer(LongformerTokenizer):
             item_position_ids = items["item_position_ids"]
             token_type_ids = items["token_type_ids"]
             attention_mask = items["attention_mask"]
-            global_attention_mask = items["global_attention_mask"]
             item_attr_type_ids = items["attr_type_ids"]
 
             length_to_pad = max_length - len(input_ids)
@@ -165,14 +162,12 @@ class RecformerTokenizer(LongformerTokenizer):
             item_position_ids += [self.config.max_item_embeddings - 1] * length_to_pad
             token_type_ids += [3] * length_to_pad
             attention_mask += [0] * length_to_pad
-            global_attention_mask += [0] * length_to_pad
             item_attr_type_ids += [0] * length_to_pad
 
             batch_input_ids.append(input_ids)
             batch_item_position_ids.append(item_position_ids)
             batch_token_type_ids.append(token_type_ids)
             batch_attention_mask.append(attention_mask)
-            batch_global_attention_mask.append(global_attention_mask)
             batch_attr_type_ids.append(item_attr_type_ids)
 
         return {
@@ -180,7 +175,6 @@ class RecformerTokenizer(LongformerTokenizer):
             "item_position_ids": batch_item_position_ids,
             "token_type_ids": batch_token_type_ids,
             "attention_mask": batch_attention_mask,
-            "global_attention_mask": batch_global_attention_mask,
             "attr_type_ids": batch_attr_type_ids,
         }
 

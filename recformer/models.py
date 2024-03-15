@@ -7,6 +7,7 @@ import torch.nn as nn
 from torch import distributed
 from torch.nn import CrossEntropyLoss
 from torch.nn.functional import cross_entropy
+from transformers import PretrainedConfig, AutoModel
 from transformers.models.longformer.modeling_longformer import (
     LongformerConfig,
     LongformerPreTrainedModel,
@@ -18,27 +19,32 @@ from transformers.models.longformer.modeling_longformer import (
 logger = logging.getLogger(__name__)
 
 
-class RecformerConfig(LongformerConfig):
+class RecformerConfig(PretrainedConfig):
     def __init__(
-        self,
-        attention_window: Union[List[int], int] = 64,
-        sep_token_id: int = 2,
-        token_type_size: int = 4,  # <s>, key, value, <pad>
-        max_token_num: int = 2048,
-        max_item_embeddings: int = 32,  # 1 for <s>, 50 for items
-        max_attr_num: int = 12,
-        max_attr_length: int = 8,
-        pooler_type: str = "cls",
-        temp: float = 0.05,
-        mlm_weight: float = 0.1,
-        item_num: int = 0,
-        finetune_negative_sample_size: int = 0,
-        **kwargs,
+            self,
+            attention_window: Union[List[int], int] = 64,
+            sep_token_id: int = 2,
+            token_type_size: int = 4,  # <s>, key, value, <pad>
+            max_item_embeddings: int = 51,  # 1 for <s>, 50 for items
+            max_attr_num: int = 3,
+            max_attr_length: int = 32,
+            pooler_type: str = "cls",
+            temp: float = 0.05,
+            mlm_weight: float = 0.1,
+            item_num: int = None,
+            finetune_negative_sample_size: int = 0,
+            max_token_num: int = None,
+            **kwargs,
     ):
-        super().__init__(attention_window, sep_token_id, **kwargs)
+        super().__init__(**kwargs)
+        self.attention_window = attention_window
+        self.sep_token_id = sep_token_id
 
         self.token_type_size = token_type_size
-        self.max_token_num = max_token_num
+        if max_token_num is not None:
+            self.max_token_num = max_token_num
+        else:
+            self.max_token_num = self.max_position_embeddings
         self.max_item_embeddings = max_item_embeddings
         self.max_attr_num = max_attr_num
         self.max_attr_length = max_attr_length
@@ -54,7 +60,6 @@ class RecformerConfig(LongformerConfig):
 
 @dataclass
 class RecformerPretrainingOutput:
-
     cl_correct_num: float = 0.0
     cl_total_num: float = 1e-5
     loss: Optional[torch.FloatTensor] = None
@@ -124,7 +129,7 @@ class RecformerEmbeddings(nn.Module):
             self.original_embedding = None
 
     def forward(
-        self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
+            self, input_ids=None, token_type_ids=None, position_ids=None, item_position_ids=None, inputs_embeds=None
     ):
         def original_forward():
             nonlocal position_ids, token_type_ids, input_ids, inputs_embeds
@@ -216,11 +221,11 @@ class RecformerPooler(nn.Module):
         self.linear = nn.Linear(config.hidden_size, config.linear_out)
 
     def forward(
-        self,
-        attention_mask: torch.Tensor,
-        hidden_states: torch.Tensor,
-        attr_type_ids: torch.Tensor,
-        item_position_ids: torch.Tensor,
+            self,
+            attention_mask: torch.Tensor,
+            hidden_states: torch.Tensor,
+            attr_type_ids: torch.Tensor,
+            item_position_ids: torch.Tensor,
     ):
         hidden_states = self.linear.forward(hidden_states)
 
@@ -350,14 +355,14 @@ class RecformerModel(LongformerPreTrainedModel):
             self.encoder.layer[layer].attention.prune_heads(heads)
 
     def _pad_to_window_size(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        token_type_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        item_position_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        pad_token_id: int,
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            token_type_ids: torch.Tensor,
+            position_ids: torch.Tensor,
+            item_position_ids: torch.Tensor,
+            inputs_embeds: torch.Tensor,
+            pad_token_id: int,
     ):
         """A helper function to pad tokens and mask to work with implementation of Longformer self-attention."""
         # padding
@@ -428,19 +433,19 @@ class RecformerModel(LongformerPreTrainedModel):
         return attention_mask
 
     def forward(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        global_attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        attr_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        item_position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            input_ids: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            global_attention_mask: Optional[torch.Tensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            token_type_ids: Optional[torch.Tensor] = None,
+            attr_type_ids: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            item_position_ids: Optional[torch.Tensor] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, RecformerBaseModelOutputWithPooling]:
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -491,8 +496,8 @@ class RecformerModel(LongformerPreTrainedModel):
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, device)[
-            :, 0, 0, :
-        ]
+                                                :, 0, 0, :
+                                                ]
 
         embedding_output = self.embeddings(
             input_ids=input_ids,
@@ -560,28 +565,28 @@ class RecformerForPretraining(nn.Module):
         self.sim = Similarity(config)
 
     def forward(
-        self,
-        input_ids_a: Optional[torch.Tensor] = None,
-        attention_mask_a: Optional[torch.Tensor] = None,
-        global_attention_mask_a: Optional[torch.Tensor] = None,
-        token_type_ids_a: Optional[torch.Tensor] = None,
-        attr_type_ids_a: Optional[torch.Tensor] = None,
-        item_position_ids_a: Optional[torch.Tensor] = None,
-        mlm_input_ids_a: Optional[torch.Tensor] = None,
-        mlm_labels_a: Optional[torch.Tensor] = None,
-        input_ids_b: Optional[torch.Tensor] = None,
-        attention_mask_b: Optional[torch.Tensor] = None,
-        global_attention_mask_b: Optional[torch.Tensor] = None,
-        token_type_ids_b: Optional[torch.Tensor] = None,
-        attr_type_ids_b: Optional[torch.Tensor] = None,
-        item_position_ids_b: Optional[torch.Tensor] = None,
-        mlm_input_ids_b: Optional[torch.Tensor] = None,
-        mlm_labels_b: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
+            self,
+            input_ids_a: Optional[torch.Tensor] = None,
+            attention_mask_a: Optional[torch.Tensor] = None,
+            global_attention_mask_a: Optional[torch.Tensor] = None,
+            token_type_ids_a: Optional[torch.Tensor] = None,
+            attr_type_ids_a: Optional[torch.Tensor] = None,
+            item_position_ids_a: Optional[torch.Tensor] = None,
+            mlm_input_ids_a: Optional[torch.Tensor] = None,
+            mlm_labels_a: Optional[torch.Tensor] = None,
+            input_ids_b: Optional[torch.Tensor] = None,
+            attention_mask_b: Optional[torch.Tensor] = None,
+            global_attention_mask_b: Optional[torch.Tensor] = None,
+            token_type_ids_b: Optional[torch.Tensor] = None,
+            attr_type_ids_b: Optional[torch.Tensor] = None,
+            item_position_ids_b: Optional[torch.Tensor] = None,
+            mlm_input_ids_b: Optional[torch.Tensor] = None,
+            mlm_labels_b: Optional[torch.Tensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
     ):
         batch_size = input_ids_a.size(0)
 
@@ -754,7 +759,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
     def __init__(self, config: RecformerConfig):
         super().__init__(config)
 
-        self.longformer = RecformerModel(config)
+        self.lm = RecformerModel(config)
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
         self.item_embedding = None
@@ -782,27 +787,27 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         return sim
 
     def forward(
-        self,
-        input_ids: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        global_attention_mask: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
-        attr_type_ids: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        item_position_ids: Optional[torch.Tensor] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        candidates: Optional[torch.Tensor] = None,  # candidate item ids
-        labels: Optional[torch.Tensor] = None,  # target item ids
+            self,
+            input_ids: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            global_attention_mask: Optional[torch.Tensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            token_type_ids: Optional[torch.Tensor] = None,
+            attr_type_ids: Optional[torch.Tensor] = None,
+            position_ids: Optional[torch.Tensor] = None,
+            item_position_ids: Optional[torch.Tensor] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+            candidates: Optional[torch.Tensor] = None,  # candidate item ids
+            labels: Optional[torch.Tensor] = None,  # target item ids
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         batch_size = input_ids.size(0)
 
-        outputs = self.longformer.forward(
+        outputs = self.lm.forward(
             input_ids,
             attention_mask=attention_mask,
             global_attention_mask=global_attention_mask,
@@ -879,14 +884,121 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         return loss
 
 
+class BERTForSeqRec(nn.Module):
+    def __init__(self, config: RecformerConfig):
+        super().__init__()
+
+        self.lm = AutoModel.from_pretrained(config.model_name_or_path)
+        self.pooler = RecformerPooler(config)
+        self.sim = Similarity(config)
+        self.item_embedding = None
+
+    def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
+        if embeddings is None:
+            raise ValueError("embeddings must be provided.")
+
+        self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
+
+    def similarity_score(self, pooler_output, candidates=None):
+        if candidates is not None:
+            raise NotImplementedError("Negative sampling disabled")
+
+        candidate_embeddings = self.item_embedding  # (|I|, attr_num, 1, hidden_size)
+        pooler_output = pooler_output.unsqueeze(1)  # (batch_size, 1, attr_num, items_max, hidden_size)
+        sim = self.sim(pooler_output, candidate_embeddings)  # (batch_size, |I|, attr_num, items_max)
+
+        return sim
+
+    def forward(
+            self,
+            input_ids: Optional[torch.Tensor] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            token_type_ids: Optional[torch.Tensor] = None,
+            item_position_ids: Optional[torch.Tensor] = None,
+            attr_type_ids: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None,  # target item ids
+    ):
+        lm_outputs = self.lm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            # position_ids=item_position_ids,
+            output_hidden_states=True,
+            return_dict=True,
+        )
+        pooler_output, pooler_output_mask = self.pooler(
+            attention_mask=attention_mask,
+            hidden_states=lm_outputs.last_hidden_state,
+            attr_type_ids=attr_type_ids,
+            item_position_ids=item_position_ids,
+        )
+
+        if labels is None:
+            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+
+            all_item_mask = torch.zeros(
+                (scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device
+            )  # (|I|, attr_num, 1)
+            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+            scores[final_mask] = -torch.inf
+
+            scores = reduce_session(
+                scores,
+                self.config.session_reduce_method,
+                self.config.session_reduce_topk,
+                mask=final_mask,
+                attribute_agg_method=self.config.attribute_agg_method,
+                linear_agg_module=self.linear_agg_module,
+            )
+            return scores
+
+        loss_fct = CrossEntropyLoss()
+
+        if self.config.finetune_negative_sample_size <= 0:  # using full softmax
+            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
+
+            all_item_mask = torch.zeros((scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device)
+            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
+            scores[final_mask] = -torch.inf
+
+            scores = reduce_session(
+                scores,
+                self.config.session_reduce_method,
+                self.config.session_reduce_topk,
+                mask=final_mask,
+                attribute_agg_method=self.config.attribute_agg_method,
+                linear_agg_module=self.linear_agg_module,
+            )
+
+            if labels.dim() == 2:
+                labels = labels.squeeze(dim=-1)
+            loss = loss_fct(scores, labels)
+
+        else:  # using sampled softmax
+            raise NotImplementedError("Negative sampling disabled")
+            candidates = torch.cat(
+                (
+                    labels.unsqueeze(-1),
+                    torch.randint(
+                        0, self.config.item_num, size=(batch_size, self.config.finetune_negative_sample_size)
+                    ).to(labels.device),
+                ),
+                dim=-1,
+            )
+            scores = self.similarity_score(pooler_output, candidates)
+            target = torch.zeros_like(labels, device=labels.device)
+            loss = loss_fct(scores, target)
+
+        return loss
+
+
 def reduce_session(
-    scores: torch.Tensor,
-    session_reduce_method: str,
-    session_reduce_topk: int | None = None,
-    session_reduce_weightedsim_temp: float = 0.05,
-    mask: torch.Tensor | None = None,
-    attribute_agg_method: str = "mean",
-    linear_agg_module: nn.Module | None = None,
+        scores: torch.Tensor,
+        session_reduce_method: str,
+        session_reduce_topk: int | None = None,
+        session_reduce_weightedsim_temp: float = 0.05,
+        mask: torch.Tensor | None = None,
+        attribute_agg_method: str = "mean",
+        linear_agg_module: nn.Module | None = None,
 ):
     """
     Mask tensor: True to mask
