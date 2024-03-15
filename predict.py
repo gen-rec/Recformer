@@ -12,11 +12,11 @@ from tqdm import tqdm
 
 from collator import EvalDataCollatorWithPadding
 from dataloader import RecformerEvalDataset
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
+from recformer import RecformerModel, RecformerForSeqRec, RecformerBertTokenizer, RecformerConfig
 from utils import AverageMeterSet, Ranker, read_json
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
-tokenizer_glb: RecformerTokenizer = None
+tokenizer_glb: RecformerBertTokenizer = None
 
 
 def load_config_tokenizer(args, item2id):
@@ -36,7 +36,7 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
 
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    tokenizer = RecformerBertTokenizer.from_pretrained(args.model_name_or_path, config)
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
@@ -75,7 +75,7 @@ def _par_tokenize_doc(doc):
     return item_id, input_ids, token_type_ids, attr_type_ids
 
 
-def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
+def encode_all_items(model: RecformerModel, tokenizer: RecformerBertTokenizer, tokenized_items, args):
     model.eval()
 
     items = sorted(list(tokenized_items.items()), key=lambda x: x[0])

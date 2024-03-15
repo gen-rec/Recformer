@@ -5,14 +5,14 @@ from typing import Optional, Union, List, Dict, Tuple
 import torch
 import unicodedata
 
-from recformer import RecformerTokenizer
+from recformer import RecformerBertTokenizer
 
 
 # Data collator
 @dataclass
 class PretrainDataCollatorWithPadding:
 
-    tokenizer: RecformerTokenizer
+    tokenizer: RecformerBertTokenizer
     tokenized_items: Dict
     mlm_probability: float
 
@@ -243,7 +243,7 @@ class PretrainDataCollatorWithPadding:
 @dataclass
 class FinetuneDataCollatorWithPadding:
 
-    tokenizer: RecformerTokenizer
+    tokenizer: RecformerBertTokenizer
     tokenized_items: Dict
 
     def __call__(
@@ -318,7 +318,7 @@ class FinetuneDataCollatorWithPadding:
 @dataclass
 class EvalDataCollatorWithPadding:
 
-    tokenizer: RecformerTokenizer
+    tokenizer: RecformerBertTokenizer
     tokenized_items: Dict
 
     def __call__(

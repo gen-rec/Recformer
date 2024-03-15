@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from collator import PretrainDataCollatorWithPadding
 from lightning_dataloader import ClickDataset
-from recformer import RecformerForPretraining, RecformerTokenizer, RecformerConfig, LitWrapper
+from recformer import RecformerForPretraining, RecformerBertTokenizer, RecformerConfig, LitWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ parser.add_argument("--longformer_ckpt", type=str, default="longformer_ckpt/long
 parser.add_argument("--fix_word_embedding", action="store_true")
 
 
-tokenizer_glb: RecformerTokenizer = None
+tokenizer_glb: RecformerBertTokenizer = None
 
 
 def _par_tokenize_doc(doc):
@@ -66,7 +66,7 @@ def main():
     config.max_item_embeddings = 51  # 50 item and 1 for cls
     config.attention_window = [64] * 12
     config.max_token_num = 1024
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    tokenizer = RecformerBertTokenizer.from_pretrained(args.model_name_or_path, config)
 
     global tokenizer_glb
     tokenizer_glb = tokenizer

@@ -46,10 +46,11 @@ def parse_finetune_args():
     parser.add_argument("--linear_out", type=int, default=256)
     parser.add_argument("--group_name", type=str, default=None)
     # path and file
-    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
+    parser.add_argument("--pretrain_ckpt", type=str, default=None, required=False)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
+    parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096",
+                        choices=["allenai/longformer-base-4096", "FacebookAI/roberta-base", "google/bert-base-uncased"])
     parser.add_argument("--train_file", type=str, default="train.json")
     parser.add_argument("--dev_file", type=str, default="val.json")
     parser.add_argument("--test_file", type=str, default="test.json")

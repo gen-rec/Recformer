@@ -13,17 +13,22 @@ from wonderwords import RandomWord
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
-from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig, BERTForSeqRec
+from recformer import RecformerModel, RecformerForSeqRec, RecformerBertTokenizer, RecformerConfig, BERTForSeqRec, \
+    RecformerRobertaTokenizer
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
+from transformers import AutoConfig
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
-tokenizer_glb: RecformerTokenizer = None
+tokenizer_glb: RecformerBertTokenizer = None
 
 SERVER_URL = "http://129.154.54.103:8080"
 
 
 def load_config_tokenizer(args, item2id):
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
+
+    if config.max_token_num is None:
+        config.max_token_num = config.max_position_embeddings
     config.model_name_or_path = args.model_name_or_path
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
@@ -36,7 +41,11 @@ def load_config_tokenizer(args, item2id):
     config.linear_out = args.linear_out
     config.attribute_agg_method = args.attribute_agg_method
 
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+
+    if 'roberta' in args.model_name_or_path.lower():
+        tokenizer = RecformerRobertaTokenizer.from_pretrained(args.model_name_or_path, config)
+    elif 'bert' in args.model_name_or_path.lower():
+        tokenizer = RecformerBertTokenizer.from_pretrained(args.model_name_or_path, config)
 
     if args.global_attention_type not in ["cls", "attribute"]:
         raise ValueError("Unknown global attention type.")
@@ -57,7 +66,7 @@ def _par_tokenize_doc(doc):
     return item_id, input_ids, token_type_ids, attr_type_ids
 
 
-def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, tokenized_items, args):
+def encode_all_items(model, tokenizer: RecformerBertTokenizer, tokenized_items, args):
     model.eval()
 
     items = sorted(list(tokenized_items.items()), key=lambda x: x[0])
@@ -67,24 +76,35 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
     with torch.no_grad():
         for i in tqdm(
-            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-            ncols=100,
-            desc="Encode all items",
+                range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+                ncols=100,
+                desc="Encode all items",
         ):
 
-            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+            item_batch = [[item] for item in items[i: i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
             for k, v in inputs.items():
                 inputs[k] = torch.LongTensor(v).to(args.device)
 
-            outputs = model(**inputs)
+            lm_outputs = model.lm(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                return_dict=True,
+            )
+
+            pooler_output, pooler_output_mask = model.pooler(
+                attention_mask=inputs["attention_mask"],
+                hidden_states=lm_outputs.last_hidden_state,
+                attr_type_ids=inputs["attr_type_ids"],
+                item_position_ids=inputs["item_position_ids"],
+            )
 
             if args.pooler_type != "token":
-                item_embeddings.append(outputs.pooler_output.detach())
+                item_embeddings.append(pooler_output.detach())
             else:
-                pooler_output = outputs.pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
+                pooler_output = pooler_output.detach()  # (bs, 1, max_seq_len, hidden_size)
                 pooler_output = pooler_output.permute(0, 2, 1, 3)  # (bs, max_seq_len, 1, hidden_size)
                 for j in range(pooler_output.shape[0]):
                     output_ = pooler_output[j]  # (max_seq_len, 1, hidden_size)
@@ -95,7 +115,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
             item_embeddings, batch_first=True, padding_value=float("nan")
         )  # (bs, max_seq_len, 1, hidden_size)
     else:
-        item_embeddings = torch.cat(item_embeddings, dim=0)  # (bs, attr_num, 1, hidden_size)
+        item_embeddings = torch.cat(item_embeddings, dim=0)  # (|I|, attr_num, 1, hidden_size)
 
     return item_embeddings
 
@@ -218,7 +238,7 @@ def main(args):
         project="AfterSIGIR",
         entity="gen-rec",
         name=server_random_word_and_date,
-        group=args.group_name or path_corpus.name,
+        group= 'roberta' if 'roberta' in args.model_name_or_path.lower() else 'bert',
         config=vars(args),
         tags=[
             path_corpus.name,
@@ -254,6 +274,7 @@ def main(args):
     )
 
     if 'longformer' in args.model_name_or_path:
+        raise NotImplementedError("Longformer is not supported.")
         model = RecformerForSeqRec(config)
         pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
         print(model.load_state_dict(pretrain_ckpt, strict=False))
@@ -267,29 +288,28 @@ def main(args):
         for param in model.lm.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.lm, tokenizer, tokenized_items, args)
-
-    model.init_item_embedding(item_embeddings)
-
-    model.to(args.device)  # send item embeddings to device
-
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = evaluate(model, test_loader, args)
-    if wandb_logger is not None:
-        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-    print(f"Test set Zero-shot: {test_metrics}")
+    if args.server != "local":
+        item_embeddings = encode_all_items(model, tokenizer, tokenized_items, args)
+        model.init_item_embedding(item_embeddings)
+        model.to(args.device)
 
-    if args.zero_shot_only:
-        return
+        test_metrics = evaluate(model, test_loader, args)
+        if wandb_logger is not None:
+            wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+        print(f"Test set Zero-shot: {test_metrics}")
+
+        if args.zero_shot_only:
+            return
 
     best_target = float("-inf")
     patient = 5
 
     for epoch in range(args.num_train_epochs):
 
-        item_embeddings = encode_all_items(model.lm, tokenizer, tokenized_items, args)
+        item_embeddings = encode_all_items(model, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)

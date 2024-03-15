@@ -41,17 +41,13 @@ class RecformerConfig(PretrainedConfig):
         self.sep_token_id = sep_token_id
 
         self.token_type_size = token_type_size
-        if max_token_num is not None:
-            self.max_token_num = max_token_num
-        else:
-            self.max_token_num = self.max_position_embeddings
         self.max_item_embeddings = max_item_embeddings
         self.max_attr_num = max_attr_num
         self.max_attr_length = max_attr_length
         self.pooler_type = pooler_type
         self.temp = temp
         self.mlm_weight = mlm_weight
-
+        self.max_token_num = max_token_num
         # finetune config
 
         self.item_num = item_num
@@ -888,16 +884,22 @@ class BERTForSeqRec(nn.Module):
     def __init__(self, config: RecformerConfig):
         super().__init__()
 
+        self.config = config
         self.lm = AutoModel.from_pretrained(config.model_name_or_path)
         self.pooler = RecformerPooler(config)
         self.sim = Similarity(config)
         self.item_embedding = None
 
+        if config.attribute_agg_method == "linear":
+            self.linear_agg_module = nn.Linear(3, 1)
+        else:
+            self.linear_agg_module = None
+
     def init_item_embedding(self, embeddings: Optional[torch.Tensor] = None):
         if embeddings is None:
             raise ValueError("embeddings must be provided.")
 
-        self.item_embedding = nn.Parameter(embeddings, requires_grad=False)
+        self.item_embedding = nn.Parameter(embeddings, requires_grad=False) # (|I|, attr_num, 1, hidden_size)
 
     def similarity_score(self, pooler_output, candidates=None):
         if candidates is not None:
@@ -921,10 +923,10 @@ class BERTForSeqRec(nn.Module):
         lm_outputs = self.lm(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            # position_ids=item_position_ids,
-            output_hidden_states=True,
             return_dict=True,
         )
+        # position_ids=item_position_ids,
+
         pooler_output, pooler_output_mask = self.pooler(
             attention_mask=attention_mask,
             hidden_states=lm_outputs.last_hidden_state,
