@@ -26,9 +26,10 @@ def load_config_tokenizer(args, item2id):
     config = RecformerConfig.from_pretrained(args.model_name_or_path)
     config.max_attr_num = 3
     config.max_attr_length = 32
-    config.max_item_embeddings = 51
     config.attention_window = [64] * 12
-    config.max_token_num = 1024
+    config.max_item_embeddings = 51
+    config.max_item_len = args.max_item_len
+    config.max_token_num = args.max_token_len
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     config.session_reduce_method = args.session_reduce_method
@@ -188,6 +189,9 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 
 
 def main(args):
+    print("\n\n\n=====================")
+    print("Pooler-128")
+    print("=====================\n\n\n")
     print(args)
 
     seed_everything(args.seed, workers=True)
@@ -221,7 +225,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="WWW-Rebuttal",
+        project="AfterSIGIR",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,

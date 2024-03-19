@@ -62,6 +62,8 @@ def parse_finetune_args():
     )
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
     # model
+    parser.add_argument("--max_item_len", type=int, default=50)
+    parser.add_argument("--max_token_len", type=int, default=1024)
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
     parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
 

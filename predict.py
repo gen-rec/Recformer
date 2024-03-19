@@ -24,6 +24,7 @@ def load_config_tokenizer(args, item2id):
     config.max_attr_num = 3
     config.max_attr_length = 32
     config.max_item_embeddings = 51
+    config.max_item_num = args.max_item_len
     config.attention_window = [64] * 12
     config.max_token_num = 1024
     config.item_num = len(item2id)

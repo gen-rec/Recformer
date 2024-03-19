@@ -86,7 +86,7 @@ class RecformerTokenizer(LongformerTokenizer):
         return: [present...past]
         """
         items = items[::-1]  # reverse items order
-        items = items[: self.config.max_item_embeddings - 1]  # truncate the number of items, -1 for <s>
+        items = items[: self.config.max_item_len]  # truncate the number of items, -1 for <s>
 
         input_ids = [self.bos_token_id]
         item_position_ids = [0]
@@ -162,7 +162,7 @@ class RecformerTokenizer(LongformerTokenizer):
             length_to_pad = max_length - len(input_ids)
 
             input_ids += [self.pad_token_id] * length_to_pad
-            item_position_ids += [self.config.max_item_embeddings - 1] * length_to_pad
+            item_position_ids += [self.config.max_item_len] * length_to_pad
             token_type_ids += [3] * length_to_pad
             attention_mask += [0] * length_to_pad
             global_attention_mask += [0] * length_to_pad
