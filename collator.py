@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 from dataclasses import dataclass
 from typing import Optional, Union, List, Dict, Tuple
@@ -5,7 +7,7 @@ from typing import Optional, Union, List, Dict, Tuple
 import torch
 import unicodedata
 
-from recformer import RecformerBertTokenizer
+from recformer import RecformerBertTokenizer, RecformerRobertaTokenizer
 
 
 # Data collator
@@ -243,7 +245,7 @@ class PretrainDataCollatorWithPadding:
 @dataclass
 class FinetuneDataCollatorWithPadding:
 
-    tokenizer: RecformerBertTokenizer
+    tokenizer: RecformerBertTokenizer | RecformerRobertaTokenizer
     tokenized_items: Dict
 
     def __call__(
@@ -318,7 +320,7 @@ class FinetuneDataCollatorWithPadding:
 @dataclass
 class EvalDataCollatorWithPadding:
 
-    tokenizer: RecformerBertTokenizer
+    tokenizer: RecformerBertTokenizer | RecformerRobertaTokenizer
     tokenized_items: Dict
 
     def __call__(
