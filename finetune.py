@@ -171,6 +171,7 @@ def main():
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
 
     # model
+    parser.add_argument("--max_token_num", type=int, default=1024, help="Max token number for longformer.")
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
 
     # train
@@ -199,7 +200,7 @@ def main():
     config.max_attr_length = 32
     config.max_item_embeddings = 51
     config.attention_window = [64] * 12
-    config.max_token_num = 1024
+    config.max_token_num = args.max_token_num
     config.item_num = len(item2id)
     config.finetune_negative_sample_size = args.finetune_negative_sample_size
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
