@@ -160,7 +160,7 @@ def main(args):
         project="AfterSIGIR",
         entity="gen-rec",
         name=server_random_word_and_date,
-        group=args.group_name or path_corpus.name,
+        group=args.group or path_corpus.name,
         config=vars(args),
         tags=[
             path_corpus.name,
@@ -172,8 +172,8 @@ def main(args):
         _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
     ]
     tokenized_items = {
-        item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
-        for item_id, input_ids, token_type_ids, attr_type_ids in doc_tuples
+        item2id[item_id]: [input_ids, token_type_ids]
+        for item_id, input_ids, token_type_ids in doc_tuples
     }
 
     print(f"Successfully load {len(tokenized_items)} tokenized items.")

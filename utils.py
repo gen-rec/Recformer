@@ -11,7 +11,7 @@ MAX_VAL = 1e4
 def parse_args():
     parser = ArgumentParser()
     # path and file
-    parser.add_argument("--server", type=int, required=True)
+    parser.add_argument("--server", type=str, required=True)
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=str, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument("--temp", type=float, default=0.05, help="Temperature for softmax.")
 
     # wandb
-    parser.add_argument("--wandb_group", type=str)
+    parser.add_argument("--group", type=str)
 
     # train
     parser.add_argument("--num_train_epochs", type=int, default=16)
