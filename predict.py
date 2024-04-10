@@ -35,6 +35,7 @@ def load_config_tokenizer(args, item2id):
     config.session_reduce_topk = args.session_reduce_topk
     config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
     config.linear_out = args.linear_out
+    config.attribute_agg_method = args.attribute_agg_method
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -121,6 +122,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 def predict(model, dataloader, args):
     model.eval()
 
+    all_scores = []
     all_predictions = []
     all_labels = []
 
@@ -135,15 +137,18 @@ def predict(model, dataloader, args):
         scores = scores.detach().cpu()
         labels = labels.detach().cpu()
 
-        predictions = torch.topk(scores, k=1, dim=-1).indices
+        all_scores.append(scores)
+
+        predictions = torch.topk(scores, k=50, dim=-1).indices
 
         all_predictions.append(predictions)
         all_labels.append(labels)
 
+    all_scores = torch.cat(all_scores, dim=0)
     all_predictions = torch.cat(all_predictions, dim=0).tolist()
     all_labels = torch.cat(all_labels, dim=0).tolist()
 
-    return all_predictions, all_labels
+    return all_scores, all_predictions, all_labels
 
 
 def evaluate(model, dataloader, args):
@@ -178,35 +183,6 @@ def evaluate(model, dataloader, args):
     average_metrics = average_meter_set.averages()
 
     return average_metrics
-
-
-def predict(model, dataloader, args):
-    model.eval()
-
-    all_scores = []
-    all_labels = []
-
-    for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
-
-        for k, v in batch.items():
-            batch[k] = v.to(args.device)
-        labels = labels.to(args.device)
-
-        with torch.no_grad():
-            scores = model(**batch)  # (bs, |I|)
-
-        assert torch.isnan(scores).sum() == 0, "NaN in scores."
-
-        all_scores.append(scores)
-        all_labels.append(labels)
-
-    all_scores = torch.cat(all_scores, dim=0)
-    all_labels = torch.cat(all_labels, dim=0).tolist()
-
-    predictions = torch.topk(all_scores, k=50, dim=-1).indices.tolist()
-
-    return predictions, all_labels
-
 
 def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: int):
     global wandb_logger
@@ -243,6 +219,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 def main():
     parser = ArgumentParser()
     # path and file
+    parser.add_argument("--linear_out", type=int, default=256)
+    parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=1)
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=str, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
@@ -276,10 +254,18 @@ def main():
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--session_reduce_method", type=str, default="maxsim")
+    parser.add_argument("--pooler_type", type=str, default="attribute", choices=["attribute", "item", "token", "cls"])
+    parser.add_argument("--original_embedding", action="store_true")
+    parser.add_argument("--attribute_agg_method", type=str, default="mean")
+    parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
+    parser.add_argument("--session_reduce_topk", type=int, default=None, help="topksim: topk")
+    parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=None, help="weightedsim: temp")
 
     args = parser.parse_args()
 
-    torch.set_float32_matmul_precision("medium")
+    torch.set_float32_matmul_precision("high")
     print(args)
 
     seed_everything(args.seed, workers=True)
@@ -311,6 +297,7 @@ def main():
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
     print(model.load_state_dict(pretrain_ckpt, strict=False))
+    model.item_embedding = pretrain_ckpt["item_embedding"].to(args.device)
     model.to(args.device)
 
     if args.fix_word_embedding:
@@ -320,11 +307,12 @@ def main():
 
     model.to(args.device)  # send item embeddings to device
 
-    predictions, targets = predict(model, test_loader, args)
+    scores, predictions, targets = predict(model, test_loader, args)
 
-    path = Path(args.pretrain_ckpt).parent / "predictions.json"
+    path = Path(args.pretrain_ckpt).parent
 
-    json.dump({"predictions": predictions, "targets": targets}, open(path, "w"), indent=1, ensure_ascii=False)
+    torch.save(scores, path / "scores.pt")
+    json.dump({"predictions": predictions, "targets": targets}, open(path / "predictions.json", "w"), indent=1, ensure_ascii=False)
 
 
 if __name__ == "__main__":
