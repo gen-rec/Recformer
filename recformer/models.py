@@ -893,6 +893,12 @@ def reduce_session(
     """
     scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
 
+    scores = scores.max(dim=-1).values  # (bs, |I|, attr_num) MaxSim
+    scores = scores.softmax(dim=1)  # (bs, |I|, attr_num)
+    scores = scores.mean(dim=-1)  # (bs, |I|)
+
+    return scores
+
     if session_reduce_method == "maxsim":
         # Replace NaN with -inf
         scores = scores.max(dim=-1).values  # (bs, |I|, num_attr)

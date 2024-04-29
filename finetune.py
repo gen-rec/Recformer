@@ -190,7 +190,7 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 
 def main(args):
     print("\n\n\n=====================")
-    print("Pooler-128")
+    print("Attr Prob Distribution")
     print("=====================\n\n\n")
     print(args)
 
