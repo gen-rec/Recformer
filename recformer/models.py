@@ -797,6 +797,8 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         return_dict: Optional[bool] = None,
         candidates: Optional[torch.Tensor] = None,  # candidate item ids
         labels: Optional[torch.Tensor] = None,  # target item ids
+        loss_reduction: str = "mean",
+        gating_vector: Optional[str] = None,
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -816,6 +818,11 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=True,
         )
+
+        if gating_vector == "cls":
+            gating_vector = outputs.last_hidden_state[:, 0, :]  # (bs, hidden_size)
+        elif gating_vector == "mean":
+            gating_vector = outputs.last_hidden_state.mean(dim=1) # (bs, hidden_size)
 
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
@@ -839,7 +846,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             )
             return scores
 
-        loss_fct = CrossEntropyLoss()
+        loss_fct = CrossEntropyLoss(reduction=loss_reduction)
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
             scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
@@ -855,10 +862,21 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 mask=final_mask,
                 attribute_agg_method=self.config.attribute_agg_method,
                 linear_agg_module=self.linear_agg_module,
-            )
+            ) # (bs, |I|) if attribute_agg_method is none, else (bs, |I|, num_attr)
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
+
+            if (gating_vector is not None) and (self.config.attribute_agg_method == "none"):
+                attr_loss = []
+                for i in range(scores.shape[-1]):
+                    loss = loss_fct(scores[:, :, i], labels) # (bs)
+                    attr_loss.append(loss)
+                attr_loss = torch.stack(attr_loss, dim=-1) # (bs, num_attr)
+                attr_loss = torch.nn.functional.softmax(-attr_loss, dim=-1) # (bs, num_attr)
+
+                return attr_loss, gating_vector, scores
+
             loss = loss_fct(scores, labels)
 
         else:  ## using sampled softmax
@@ -892,12 +910,6 @@ def reduce_session(
     Mask tensor: True to mask
     """
     scores: torch.Tensor  # (bs, |I|, attr_num, items_max)
-
-    scores = scores.max(dim=-1).values  # (bs, |I|, attr_num) MaxSim
-    scores = scores.softmax(dim=1)  # (bs, |I|, attr_num)
-    scores = scores.mean(dim=-1)  # (bs, |I|)
-
-    return scores
 
     if session_reduce_method == "maxsim":
         # Replace NaN with -inf
@@ -950,6 +962,8 @@ def reduce_session(
         scores = scores.max(dim=-1).values
     elif attribute_agg_method == "linear":
         scores = linear_agg_module(scores).squeeze(-1)
+    elif attribute_agg_method == "none":
+        pass
     else:
         raise ValueError("Unknown attribute aggregation method.")
 
