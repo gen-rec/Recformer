@@ -68,7 +68,8 @@ def train_gating_layer_epoch(mars, gating_layer, dataloader, optimizer, schedule
             batch[k] = v.to(args.device)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16), torch.no_grad():
-            mars_loss, mars_gating_vector, _ = mars.forward(loss_reduction='none', gating_vector=args.gating_method, **batch)
+            mars_loss, mars_gating_vector, _ = mars.forward(loss_reduction='none', gating_method=args.gating_method,
+                                                            **batch)
             # mars_loss (bs, num_attr)
             # mars_gating_vector (bs, hidden_size)
 
@@ -91,6 +92,7 @@ def train_gating_layer_epoch(mars, gating_layer, dataloader, optimizer, schedule
     return sum(epoch_losses) / len(epoch_losses)
 
 
+@torch.no_grad()
 def evaluate_gating_layer(mars, gating_layer, dataloader, args, return_preds=False, mode="val"):
     mars.eval()
     gating_layer.eval()
@@ -103,39 +105,43 @@ def evaluate_gating_layer(mars, gating_layer, dataloader, args, return_preds=Fal
     all_weights = []
     total_loss, title_loss, brand_loss, category_loss = 0, 0, 0, 0
 
-    with torch.no_grad():
-        for batch, labels in tqdm(dataloader, ncols=100, desc="[Eval]"):
-            for k, v in batch.items():
-                batch[k] = v.to(args.device)
-            labels = labels.to(args.device)
-            mars_loss, mars_gating_vector, mars_scores = mars.forward(loss_reduction='none',
-                                                                      gating_vector=args.gating_method,
-                                                                      **batch)
-            weight = gating_layer(mars_gating_vector)  # (bs, num_attr)
-            attr_scores = mars_scores * weight.unqueeze(1)  # (bs, num_items, num_attr)
-            scores = attr_scores.sum(dim=-1)  # (bs, num_items)
+    for batch, labels in tqdm(dataloader, ncols=100, desc="[Eval]"):
+        for k, v in batch.items():
+            batch[k] = v.to(args.device)
+        labels = labels.to(args.device).squeeze(dim=-1)
+        mars_loss, mars_gating_vector, mars_scores = mars.forward(loss_reduction='none',
+                                                                  gating_method=args.gating_method,
+                                                                  **batch, labels=labels)
 
-            loss = nn.CrossEntropyLoss()
-            title_loss += loss(attr_scores[:, :, 0], labels)
-            brand_loss += loss(attr_scores[:, :, 1], labels)
-            category_loss += loss(attr_scores[:, :, 2], labels)
-            total_loss += loss(scores, labels)
+        weight = gating_layer(mars_gating_vector)  # (bs, num_attr)
+        weight = torch.softmax(weight, dim=-1)
 
-            all_weights.append(weight.detach().clone().cpu())
-            all_scores.append(scores.detach().clone().cpu())
-            all_labels.append(labels.detach().clone().cpu())
+        gating_loss = cross_entropy(weight, mars_loss)
 
-            res = ranker(scores, labels)
+        attr_scores = mars_scores * weight.unsqueeze(1)  # (bs, num_items, num_attr)
+        scores = attr_scores.sum(dim=-1)  # (bs, num_items)
 
-            metrics = {}
-            for i, k in enumerate(args.metric_ks):
-                metrics["NDCG@%d" % k] = res[2 * i]
-                metrics["Recall@%d" % k] = res[2 * i + 1]
-            metrics["MRR"] = res[-3]
-            metrics["AUC"] = res[-2]
+        title_loss += cross_entropy(attr_scores[:, :, 0], labels)
+        brand_loss += cross_entropy(attr_scores[:, :, 1], labels)
+        category_loss += cross_entropy(attr_scores[:, :, 2], labels)
+        total_loss += cross_entropy(scores, labels)
 
-            for k, v in metrics.items():
-                average_meter_set.update(k, v)
+        all_weights.append(weight.detach().cpu().clone())
+        all_scores.append(scores.detach().cpu().clone())
+        all_labels.append(labels.detach().cpu().clone())
+
+        res = ranker(scores, labels)
+
+        metrics = {}
+        for i, k in enumerate(args.metric_ks):
+            metrics["NDCG@%d" % k] = res[2 * i]
+            metrics["Recall@%d" % k] = res[2 * i + 1]
+        metrics["MRR"] = res[-3]
+        metrics["AUC"] = res[-2]
+
+        for k, v in metrics.items():
+            average_meter_set.update(k, v)
+        average_meter_set.update("loss", gating_loss.item())
 
     average_metrics = average_meter_set.averages()
 
@@ -145,13 +151,13 @@ def evaluate_gating_layer(mars, gating_layer, dataloader, args, return_preds=Fal
             wandb_logger.log({"valid-loss/brand_loss": brand_loss / len(dataloader)})
             wandb_logger.log({"valid-loss/category_loss": category_loss / len(dataloader)})
             wandb_logger.log({"valid-loss/total_loss": total_loss / len(dataloader)})
-            wandb_logger.log({"valid-metrics": average_metrics})
+            wandb_logger.log({f"valid-metrics/{k}": v for k, v in average_metrics.items()})
         else:
             wandb_logger.log({"test-loss/title_loss": title_loss / len(dataloader)})
             wandb_logger.log({"test-loss/brand_loss": brand_loss / len(dataloader)})
             wandb_logger.log({"test-loss/category_loss": category_loss / len(dataloader)})
             wandb_logger.log({"test-loss/total_loss": total_loss / len(dataloader)})
-            wandb_logger.log({"test-metrics": average_metrics})
+            wandb_logger.log({f"test-metrics/{k}": v for k, v in average_metrics.items()})
 
     if return_preds:
         all_weights = torch.cat(all_weights, dim=0)
@@ -182,9 +188,10 @@ def main(args):
     wandb_logger = wandb.init(
         project="MarsGating",
         entity="gen-rec",
-        name= path_corpus.name + time.strftime("%Y%m%d-%H%M%S"),
-        group=path_corpus.name,
+        name=path_corpus.name + time.strftime("%Y%m%d-%H%M%S"),
+        group=path_corpus.name + "only_gating",
         config=vars(args),
+        tags=[args.gating_method, "only_gating"],
     )
 
     doc_tuples = [
@@ -233,15 +240,18 @@ def main(args):
     gating_layer.apply(_initialize)
 
     optimizer = optim.Adam(gating_layer.parameters(), lr=args.learning_rate)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.1)
 
     best_target = 0
     patient = 5
 
+    zero_metrics = evaluate_gating_layer(model, gating_layer, test_loader, args, return_preds=False, mode="val")
+    print("T")
+    print(zero_metrics)
     for epoch in range(args.num_train_epochs):
         train_loss = train_gating_layer_epoch(model, gating_layer, train_loader, optimizer, scheduler, epoch, args)
         val_metrics = evaluate_gating_layer(model, gating_layer, dev_loader, args, return_preds=False, mode="val")
-
+        print(val_metrics)
         if val_metrics[args.early_stop_metric] > best_target:
             best_target = val_metrics[args.early_stop_metric]
             patient = 5
@@ -253,7 +263,7 @@ def main(args):
 
     test_metrics, predictions, labels, test_weight = evaluate_gating_layer(model, gating_layer, test_loader,
                                                                            args,
-                                                                           return_preds=False, mode="test")
+                                                                           return_preds=True, mode="test")
     users = list(map(int, test.keys()))
     users = list(map(id2user.get, users))
 
@@ -268,6 +278,7 @@ def main(args):
         output[user] = {"predictions": prediction, "target": label, "weights": weight}
 
     json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
+
 
 def parse_finetune_args():
     parser = ArgumentParser()
@@ -306,7 +317,7 @@ def parse_finetune_args():
     parser.add_argument("--finetune_negative_sample_size", type=int, default=-1)
     parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 20, 50], help="ks for Metric@k")
     parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--warmup_steps", type=int, default=800)
     parser.add_argument("--device", type=int, default=0)
@@ -321,7 +332,7 @@ def parse_finetune_args():
     parser.add_argument("--one_step_training", action="store_true")
     parser.add_argument("--session_reduce_topk", type=int, default=None, help="topksim: topk")
     parser.add_argument("--session_reduce_weightedsim_temp", type=float, default=None, help="weightedsim: temp")
-    parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=2)
+    parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=1)
     parser.add_argument("--encode_item_batch_size_multiplier", type=int, default=4)
     parser.add_argument("--random_word", type=str, default=None)
     parser.add_argument("--zero_shot_only", action="store_true")
@@ -329,7 +340,5 @@ def parse_finetune_args():
     return parser.parse_args()
 
 
-
 if __name__ == "__main__":
     main(parse_finetune_args())
-

@@ -45,6 +45,11 @@ def parse_finetune_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--linear_out", type=int, default=256)
     parser.add_argument("--group_name", type=str, default=None)
+    # gating
+    parser.add_argument("--gating", action="store_true")
+    parser.add_argument("--gating_method", type=str, choices=["cls", "mean"])
+    parser.add_argument("--jointly_gating", action="store_true")
+    parser.add_argument("--alpha", type=float, default=0.5)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
@@ -68,7 +73,7 @@ def parse_finetune_args():
     parser.add_argument("--global_attention_type", type=str, default="cls", choices=["cls", "attribute"])
 
     # train
-    parser.add_argument("--early_stop_metric", type=str, default="NDCG@10", help="Metric for early stopping.")
+    parser.add_argument("--early_stop_metric", type=str, default="NDCG@50", help="Metric for early stopping.")
     parser.add_argument("--num_train_epochs", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)

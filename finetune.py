@@ -3,6 +3,9 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+from torch import nn
+from torch.nn.functional import cross_entropy
+
 import wandb
 from pytorch_lightning import seed_everything
 from torch.cuda.amp import autocast
@@ -72,12 +75,12 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
     with torch.no_grad():
         for i in tqdm(
-            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-            ncols=100,
-            desc="Encode all items",
+                range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+                ncols=100,
+                desc="Encode all items",
         ):
 
-            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+            item_batch = [[item] for item in items[i: i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
@@ -188,9 +191,114 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
     return sum(epoch_losses) / len(epoch_losses)
 
 
+def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, scheduler, args, train_step: int):
+    epoch_losses = []
+
+    model.train()
+    gating_layer.train()
+    loss_fn = nn.CrossEntropyLoss()
+    gating_loss_fn = nn.CrossEntropyLoss()
+
+    for step, batch in enumerate(tqdm(dataloader, ncols=100, desc="Training")):
+        for k, v in batch.items():
+            batch[k] = v.to(args.device)
+
+        label = batch['labels'] if batch.dim() == 1 else batch['labels'].squeeze(dim=-1)
+
+        with autocast(dtype=torch.bfloat16, enabled=args.bf16):
+            gating_vector, total_loss, attr_loss, total_scores, attr_scores, = model.forward(**batch,
+                                                                                             loss_reduction="none",
+                                                                                             gating_method=args.gating_method)
+
+            gating_weight = gating_layer(gating_vector)  # (bs, num_attr)
+            gating_weight = torch.softmax(gating_weight, dim=-1)  # (bs, num_attr)
+            gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
+            gating_loss = gating_loss_fn(gating_weight, gating_label, reduction="mean")
+
+            if args.jointly_gating:
+                gating_weight = gating_weight.detach()
+                scores = scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
+                scores = scores.sum(dim=-1)  # (bs, |I|)
+                total_loss = loss_fn(scores, label)
+
+            loss = total_loss + args.alpha * gating_loss
+
+            if wandb_logger is not None:
+                gating_weight_ = gating_weight.detach().cpu().numpy()
+                wandb_logger.log({f"train_step_{train_step}/title_weight": torch.mean(gating_weight_[:, 0]).item()})
+                wandb_logger.log({f"train_step_{train_step}/brand_weight": torch.mean(gating_weight_[:, 1]).item()})
+                wandb_logger.log({f"train_step_{train_step}/category_weight": torch.mean(gating_weight_[:, 2]).item()})
+                wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
+                epoch_losses.append(loss.item())
+
+            if args.gradient_accumulation_steps > 1:
+                loss = loss / args.gradient_accumulation_steps
+
+            loss.backward()
+
+            if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(dataloader) - 1:
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()  # Update learning rate schedule
+
+        if wandb_logger is not None:
+            wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
+
+    return sum(epoch_losses) / len(epoch_losses)
+
+
+@torch.no_grad()
+def evaluate_with_gating(model, gating_layer, dataloader, args, return_preds=False):
+    model.eval()
+    gating_layer.eval()
+
+    ranker = Ranker(args.metric_ks)
+    average_meter_set = AverageMeterSet()
+
+    all_scores, all_labels, all_weights = [], [], []
+
+    for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
+        for k, v in batch.items():
+            batch[k] = v.to(args.device)
+        labels = labels.to(args.device).squeeze(dim=-1)
+        gating_vector, attr_scores = model.forward(**batch, loss_reduction="none",
+                                                   gating_method=args.gating_method)
+        gating_weight = gating_layer(gating_vector)  # (bs, num_attr)
+        gating_weight = torch.softmax(gating_weight, dim=-1)  # (bs, num_attr)
+        attr_scores = attr_scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
+        attr_scores = attr_scores.sum(dim=-1)  # (bs, |I|)
+
+        all_weights.append(gating_weight.detach().cpu())
+        all_scores.append(attr_scores.detach().cpu())
+        all_labels.append(labels.detach().cpu())
+
+        res = ranker(attr_scores, labels)
+        metrics = {}
+        for i, k in enumerate(args.metric_ks):
+            metrics["NDCG@%d" % k] = res[2 * i]
+            metrics["Recall@%d" % k] = res[2 * i + 1]
+        metrics["MRR"] = res[-3]
+        metrics["AUC"] = res[-2]
+
+        for k, v in metrics.items():
+            average_meter_set.update(k, v)
+
+    average_metrics = average_meter_set.averages()
+
+    if return_preds:
+        all_scores = torch.cat(all_scores, dim=0)
+        all_labels = torch.cat(all_labels, dim=0).squeeze()
+        all_weights = torch.cat(all_weights, dim=0)
+        all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
+        return average_metrics, all_predictions, all_labels, all_weights
+
+    else:
+        return average_metrics
+
+
 def main(args):
     print("\n\n\n=====================")
-    print("Attr Prob Distribution")
+    print("Gating with loss")
     print("=====================\n\n\n")
     print(args)
 
@@ -224,20 +332,27 @@ def main(args):
         raise FileExistsError(f"Output directory ({path_output}) already exists.")
 
     global wandb_logger
+    tag_list = [
+        path_corpus.name,
+        f"pool_{args.pooler_type}",
+        f"reduce_session_{args.session_reduce_method}",
+        f"global_attn_{args.global_attention_type}",
+        f"linear_{args.linear_out}",
+        f"seed_{args.seed}",
+    ]
+    if args.gating:
+        tag_list.append(f"gating_{args.gating_method}", )
+        if args.jointly_gating:
+            tag_list.append("jointly_gating")
+        tag_list.append(f"gating_alpha_{args.alpha}")
+
     wandb_logger = wandb.init(
         project="AfterSIGIR",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
         config=vars(args),
-        tags=[
-            path_corpus.name,
-            f"pool_{args.pooler_type}",
-            f"reduce_session_{args.session_reduce_method}",
-            f"global_attn_{args.global_attention_type}",
-            f"linear_{args.linear_out}",
-            f"seed_{args.seed}",
-        ],
+        tags=tag_list,
     )
 
     doc_tuples = [
@@ -268,27 +383,32 @@ def main(args):
     print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
 
+    if args.gating:
+        gating_layer = initialize_gating_layer(args, config)
+        gating_layer.to(args.device)
+
     if args.fix_word_embedding:
         print("Fix word embeddings.")
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-
-    model.init_item_embedding(item_embeddings)
 
     model.to(args.device)  # send item embeddings to device
 
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = evaluate(model, test_loader, args)
-    if wandb_logger is not None:
-        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-    print(f"Test set Zero-shot: {test_metrics}")
 
-    if args.zero_shot_only:
-        return
+    if args.server != "local":
+        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+        model.init_item_embedding(item_embeddings)
+        test_metrics = evaluate(model, test_loader, args)
+        if wandb_logger is not None:
+            wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+        print(f"Test set Zero-shot: {test_metrics}")
+
+        if args.zero_shot_only:
+            return
 
     best_target = float("-inf") if args.early_stop_metric != "loss" else float("inf")
     patient = 5
@@ -338,18 +458,28 @@ def main(args):
 
     test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
+    if args.gating:
+        print("Gating layer is enabled.")
+        model.config.attribute_agg_method = "none"
+
     if wandb_logger is not None:
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
 
     if not args.one_step_training:
-        patient = 3
+        patient = 5
 
         for epoch in range(args.num_train_epochs):
 
-            loss = train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
+            if args.gating:
+                loss = train_one_epoch_with_gating(model, gating_layer, train_loader, optimizer, scheduler, args, 2)
+            else:
+                loss = train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
-                dev_metrics = evaluate(model, dev_loader, args)
+                if args.gating:
+                    dev_metrics = evaluate_with_gating(model, gating_layer, dev_loader, args)
+                else:
+                    dev_metrics = evaluate(model, dev_loader, args)
                 print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
                 if wandb_logger is not None:
@@ -409,6 +539,23 @@ def main(args):
 
         # Send to http
         # send_http(args, output, random_word)
+
+
+def initialize_gating_layer(args, config):
+    gating_layer = nn.Sequential(
+        nn.Linear(config.hidden_size, args.linear_out),
+        nn.ReLU(),
+        nn.Linear(args.linear_out, config.max_attr_num),
+    )
+
+    def _initialize(m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+    gating_layer.apply(_initialize)
+    return gating_layer
 
 
 def send_http(args, output, run_name):
