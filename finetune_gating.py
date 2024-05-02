@@ -64,21 +64,22 @@ def train_gating_layer_epoch(mars, gating_layer, dataloader, optimizer, schedule
     mars.eval()
     gating_layer.train()
 
+    gating_loss_fn = nn.CrossEntropyLoss()
+
     for step, batch in enumerate(tqdm(dataloader, ncols=100, desc=f"[Train] Epoch {epoch}")):
         for k, v in batch.items():
             batch[k] = v.to(args.device)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16), torch.no_grad():
-            mars_loss, mars_gating_vector, _ = mars.forward(loss_reduction='none', gating_method=args.gating_method,
-                                                            **batch)
-            # mars_loss (bs, num_attr)
-            # mars_gating_vector (bs, hidden_size)
+            gating_vector, total_loss, attr_loss, total_scores, attr_scores, = mars.forward(**batch,
+                                                                                            loss_reduction="none",
+                                                                                            gating_method=args.gating_method)
+        gating_weight = gating_layer(gating_vector)
+        gating_weight = torch.softmax(gating_weight, dim=-1)
+        gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
+        loss = gating_loss_fn(gating_weight, gating_label)
 
         optimizer.zero_grad()
-
-        weight = gating_layer(mars_gating_vector)  # (bs, num_attr)
-        loss = cross_entropy(weight, mars_loss)  # (bs, num_attr)
-
         loss.backward()
         optimizer.step()
         scheduler.step()
@@ -106,20 +107,24 @@ def evaluate_gating_layer(mars, gating_layer, dataloader, args, return_preds=Fal
     all_weights = []
     total_loss, title_loss, brand_loss, category_loss = 0, 0, 0, 0
 
+    gating_loss_fn = nn.CrossEntropyLoss()
+
     for batch, labels in tqdm(dataloader, ncols=100, desc="[Eval]"):
         for k, v in batch.items():
             batch[k] = v.to(args.device)
         labels = labels.to(args.device).squeeze(dim=-1)
-        mars_loss, mars_gating_vector, mars_scores = mars.forward(loss_reduction='none',
-                                                                  gating_method=args.gating_method,
-                                                                  **batch, labels=labels)
 
-        weight = gating_layer(mars_gating_vector)  # (bs, num_attr)
-        weight = torch.softmax(weight, dim=-1)
+        with autocast(dtype=torch.bfloat16, enabled=args.bf16), torch.no_grad():
+            gating_vector, total_loss, attr_loss, total_scores, attr_scores, = mars.forward(**batch,
+                                                                                            loss_reduction="none",
+                                                                                            gating_method=args.gating_method)
 
-        gating_loss = cross_entropy(weight, mars_loss)
+        gating_weight = gating_layer(gating_vector)
+        gating_weight = torch.softmax(gating_weight, dim=-1)
+        gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
+        gating_loss = gating_loss_fn(gating_weight, gating_label)
 
-        attr_scores = mars_scores * weight.unsqueeze(1)  # (bs, num_items, num_attr)
+        attr_scores = attr_scores * gating_weight.unsqueeze(1)  # (bs, num_items, num_attr)
         scores = attr_scores.sum(dim=-1)  # (bs, num_items)
 
         title_loss += cross_entropy(attr_scores[:, :, 0], labels)
@@ -127,7 +132,7 @@ def evaluate_gating_layer(mars, gating_layer, dataloader, args, return_preds=Fal
         category_loss += cross_entropy(attr_scores[:, :, 2], labels)
         total_loss += cross_entropy(scores, labels)
 
-        all_weights.append(weight.detach().cpu().clone())
+        all_weights.append(gating_weight.detach().cpu().clone())
         all_scores.append(scores.detach().cpu().clone())
         all_labels.append(labels.detach().cpu().clone())
 
