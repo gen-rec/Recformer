@@ -203,7 +203,7 @@ def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, sche
         for k, v in batch.items():
             batch[k] = v.to(args.device)
 
-        label = batch['labels'] if batch.dim() == 1 else batch['labels'].squeeze(dim=-1)
+        label = batch['labels'] if batch['labels'].dim() == 1 else batch['labels'].squeeze(dim=-1)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
             gating_vector, total_loss, attr_loss, total_scores, attr_scores, = model.forward(**batch,
@@ -213,36 +213,36 @@ def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, sche
             gating_weight = gating_layer(gating_vector)  # (bs, num_attr)
             gating_weight = torch.softmax(gating_weight, dim=-1)  # (bs, num_attr)
             gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
-            gating_loss = gating_loss_fn(gating_weight, gating_label, reduction="mean")
+            gating_loss = gating_loss_fn(gating_weight, gating_label)
 
-            if args.jointly_gating:
-                gating_weight = gating_weight.detach()
-                scores = scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
-                scores = scores.sum(dim=-1)  # (bs, |I|)
-                total_loss = loss_fn(scores, label)
+        if args.jointly_gating:
+            gating_weight = gating_weight.detach()
+            scores = attr_scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
+            scores = scores.sum(dim=-1)  # (bs, |I|)
+            total_loss = loss_fn(scores, label)
 
-            loss = total_loss + args.alpha * gating_loss
-
-            if wandb_logger is not None:
-                gating_weight_ = gating_weight.detach().cpu().numpy()
-                wandb_logger.log({f"train_step_{train_step}/title_weight": torch.mean(gating_weight_[:, 0]).item()})
-                wandb_logger.log({f"train_step_{train_step}/brand_weight": torch.mean(gating_weight_[:, 1]).item()})
-                wandb_logger.log({f"train_step_{train_step}/category_weight": torch.mean(gating_weight_[:, 2]).item()})
-                wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
-                epoch_losses.append(loss.item())
-
-            if args.gradient_accumulation_steps > 1:
-                loss = loss / args.gradient_accumulation_steps
-
-            loss.backward()
-
-            if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(dataloader) - 1:
-                optimizer.step()
-                optimizer.zero_grad()
-                scheduler.step()  # Update learning rate schedule
+        loss = total_loss + args.alpha * gating_loss
 
         if wandb_logger is not None:
-            wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
+            gating_weight_ = gating_weight.detach().squeeze().cpu().numpy()
+            wandb_logger.log({f"train_step_{train_step}/title_weight": gating_weight_[0]})
+            wandb_logger.log({f"train_step_{train_step}/brand_weight": gating_weight_[1]})
+            wandb_logger.log({f"train_step_{train_step}/category_weight": gating_weight_[2]})
+            wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
+            epoch_losses.append(loss.item())
+
+        if args.gradient_accumulation_steps > 1:
+            loss = loss / args.gradient_accumulation_steps
+
+        loss.backward()
+
+        if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(dataloader) - 1:
+            optimizer.step()
+            optimizer.zero_grad()
+            scheduler.step()  # Update learning rate schedule
+
+    if wandb_logger is not None:
+        wandb_logger.log({f"train_step_{train_step}/epoch_loss": sum(epoch_losses) / len(epoch_losses)})
 
     return sum(epoch_losses) / len(epoch_losses)
 

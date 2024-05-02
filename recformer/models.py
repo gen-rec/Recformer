@@ -846,12 +846,12 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             else:
                 raise ValueError("Unknown gating method.")
 
-            attr_loss = []
-            for i in range(scores.shape[-1]):
-                loss = loss_fct(scores[:, :, i], labels)  # (bs)
-                attr_loss.append(loss)
+            if labels is not None:
+                attr_loss = []
+                for i in range(scores.shape[-1]):
+                    loss = loss_fct(scores[:, :, i], labels)  # (bs)
+                    attr_loss.append(loss)
 
-            if labels:
                 attr_loss = torch.stack(attr_loss, dim=-1)  # (bs, num_attr)
                 total_scores = scores.mean(dim=-1)  # (bs, |I|)
                 total_loss = loss_fct(total_scores, labels)

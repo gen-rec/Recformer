@@ -61,6 +61,7 @@ def _par_tokenize_doc(doc):
 
 def train_gating_layer_epoch(mars, gating_layer, dataloader, optimizer, scheduler, epoch, args):
     epoch_losses = []
+    mars.eval()
     gating_layer.train()
 
     for step, batch in enumerate(tqdm(dataloader, ncols=100, desc=f"[Train] Epoch {epoch}")):
