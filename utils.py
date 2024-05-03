@@ -91,7 +91,20 @@ def parse_finetune_args():
     parser.add_argument("--random_word", type=str, default=None)
     parser.add_argument("--zero_shot_only", action="store_true")
     parser.add_argument("--attribute_agg_method", type=str, default="mean")
-    return parser.parse_args()
+
+    parser.add_argument("--loss_weight", type=eval, default=None)
+
+    args = parser.parse_args()
+
+    print(f"!!!!!!{args.loss_weight}")
+
+    if args.loss_weight == 1:
+        args.loss_weight = None
+
+    if args.loss_weight is None:
+        args.loss_weight = [1 / 3] * 3
+
+    return args
 
 
 class AverageMeter(object):

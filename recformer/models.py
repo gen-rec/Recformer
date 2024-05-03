@@ -751,13 +751,14 @@ class RecformerForPretraining(nn.Module):
 
 
 class RecformerForSeqRec(LongformerPreTrainedModel):
-    def __init__(self, config: RecformerConfig):
+    def __init__(self, config: RecformerConfig, loss_weight):
         super().__init__(config)
 
         self.longformer = RecformerModel(config)
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
         self.item_embedding = None
+        self.loss_weight = nn.Parameter(torch.softmax(torch.tensor(loss_weight), dim=-1), requires_grad=False)
         self.post_init()
 
         if config.attribute_agg_method == "linear":
@@ -836,7 +837,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 mask=final_mask,
                 attribute_agg_method=self.config.attribute_agg_method,
                 linear_agg_module=self.linear_agg_module,
-            )
+            )  # (bs, |I|, attr_num)
             return scores
 
         loss_fct = CrossEntropyLoss()
@@ -855,11 +856,23 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 mask=final_mask,
                 attribute_agg_method=self.config.attribute_agg_method,
                 linear_agg_module=self.linear_agg_module,
-            )
+            )  # (bs, |I|, attr_num)
 
             if labels.dim() == 2:
                 labels = labels.squeeze(dim=-1)
-            loss = loss_fct(scores, labels)
+
+            scores = scores.permute(2, 0, 1)  # (attr_num, bs, |I|)
+            losses = []
+            for i, score in enumerate(scores):
+                l = loss_fct(score, labels)
+                losses.append(l)
+            losses = torch.stack(losses)
+
+            loss = torch.dot(losses, self.loss_weight)
+
+            with torch.no_grad():
+                scores = scores.mean(0)
+                cat_loss = loss_fct(scores, labels)
 
         else:  ## using sampled softmax
             raise NotImplementedError("Negative sampling disabled")
@@ -876,7 +889,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             target = torch.zeros_like(labels, device=labels.device)
             loss = loss_fct(scores, target)
 
-        return loss
+        return cat_loss, loss, losses
 
 
 def reduce_session(
@@ -937,6 +950,8 @@ def reduce_session(
         scores = scores.sum(dim=-1) / scores_nonzero  # (bs, |I|, num_attr)
     else:
         raise ValueError("Unknown session reduce method.")
+
+    return scores
 
     if attribute_agg_method == "mean":
         scores = scores.mean(dim=-1)

@@ -75,7 +75,6 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
             ncols=100,
             desc="Encode all items",
         ):
-
             item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
@@ -104,6 +103,7 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     return item_embeddings
 
 
+@torch.no_grad()
 def evaluate(model, dataloader, args, return_preds=False):
     model.eval()
 
@@ -114,13 +114,14 @@ def evaluate(model, dataloader, args, return_preds=False):
     all_labels = []
 
     for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
-
         for k, v in batch.items():
             batch[k] = v.to(args.device)
         labels = labels.to(args.device)
 
-        with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            scores = model(**batch)  # (bs, |I|, num_attr, items_max)
+        with autocast(dtype=torch.bfloat16, enabled=args.bf16):
+            scores_raw = model(**batch)  # (bs, |I|, num_attr, items_max)
+
+        scores = scores_raw.mean(-1)
 
         all_scores.append(scores.detach().clone().cpu())
         all_labels.append(labels.detach().clone().cpu())
@@ -135,6 +136,15 @@ def evaluate(model, dataloader, args, return_preds=False):
             metrics["Recall@%d" % k] = res[2 * i + 1]
         metrics["MRR"] = res[-3]
         metrics["AUC"] = res[-2]
+        metrics["loss"] = res[-1]
+
+        for i, k in enumerate(["title", "brand", "category"]):
+            res = ranker(scores_raw[:, :, i], labels)
+
+            for j, l in enumerate(args.metric_ks):
+                metrics[f"{k}_NDCG@{l}"] = res[2 * j]
+                metrics[f"{k}_Recall@{l}"] = res[2 * j + 1]
+                metrics[f"{k}_loss"] = res[-1]
 
         for k, v in metrics.items():
             average_meter_set.update(k, v)
@@ -162,13 +172,22 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
             batch[k] = v.to(args.device)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            loss = model(**batch)
+            cat_loss, loss, losses = model(**batch)
+            cat_loss: torch.Tensor
+            loss: torch.Tensor
+            losses: torch.Tensor
 
         if torch.any(torch.isnan(loss)):
             continue
 
         if wandb_logger is not None:
-            wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
+            log_item = [
+                (f"train_step_{train_step}/loss", loss.item()),
+                (f"train_step_{train_step}/loss_cat", cat_loss.item()),
+            ]
+            for k, v in zip(["title", "brand", "category"], losses):
+                log_item.append((f"train_step_{train_step}/loss_{k}", v.item()))
+            wandb_logger.log(dict(log_item))
             epoch_losses.append(loss.item())
 
         if args.gradient_accumulation_steps > 1:
@@ -219,7 +238,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="WWW-Rebuttal",
+        project="MarsSeparateLoss",
         entity="gen-rec",
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
@@ -257,7 +276,7 @@ def main(args):
         test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
     )
 
-    model = RecformerForSeqRec(config)
+    model = RecformerForSeqRec(config, loss_weight=args.loss_weight)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
     print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
@@ -288,7 +307,6 @@ def main(args):
     patient = 5
 
     for epoch in range(args.num_train_epochs):
-
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
@@ -324,7 +342,6 @@ def main(args):
         patient = 3
 
         for epoch in range(args.num_train_epochs):
-
             train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
@@ -377,6 +394,7 @@ def main(args):
 
 def send_http(args, output, run_name):
     import requests
+
     data = json.dumps(output).encode("utf-8")
     file_name = f"MARS_{args.data_path.name.replace('_ours', '')}_{args.seed}_{run_name}.json"
     headers = {"Content-Type": "application/json", "File-Name": file_name}
