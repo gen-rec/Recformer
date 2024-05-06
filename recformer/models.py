@@ -32,6 +32,7 @@ class RecformerConfig(LongformerConfig):
         temp: float = 0.05,
         mlm_weight: float = 0.1,
         item_num: int = 0,
+        patience: tuple[int] = (3, 5),
         finetune_negative_sample_size: int = 0,
         **kwargs,
     ):
@@ -48,6 +49,7 @@ class RecformerConfig(LongformerConfig):
 
         # finetune config
 
+        self.patience = patience
         self.item_num = item_num
         self.finetune_negative_sample_size = finetune_negative_sample_size
 
@@ -758,7 +760,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
         self.item_embedding = None
-        self.loss_weight = nn.Parameter(torch.softmax(torch.tensor(loss_weight), dim=-1), requires_grad=False)
+        self.loss_weight = nn.Parameter(torch.softmax(torch.tensor(loss_weight, dtype=torch.float), dim=-1), requires_grad=False)
         self.post_init()
 
         if config.attribute_agg_method == "linear":

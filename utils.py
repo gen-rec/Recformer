@@ -93,6 +93,7 @@ def parse_finetune_args():
     parser.add_argument("--attribute_agg_method", type=str, default="mean")
 
     parser.add_argument("--loss_weight", type=eval, default=None)
+    parser.add_argument("--patience", type=eval, default=None)
 
     args = parser.parse_args()
 
@@ -103,6 +104,14 @@ def parse_finetune_args():
 
     if args.loss_weight is None:
         args.loss_weight = [1 / 3] * 3
+
+    if args.patience is None:
+        args.patience = (3, 5)
+    else:
+        pat = args.patience
+        if len(pat) != 2 and any([not isinstance(i, int) for i in pat]):
+            raise ValueError("Invalid patience")
+        args.patience = pat
 
     return args
 

@@ -304,7 +304,7 @@ def main(args):
         return
 
     best_target = float("-inf")
-    patient = 5
+    patient = args.patience[0]
 
     for epoch in range(args.num_train_epochs):
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
@@ -322,7 +322,7 @@ def main(args):
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
-                patient = 5
+                patient = args.patience[0]
                 torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
             else:
@@ -339,7 +339,7 @@ def main(args):
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
 
     if not args.one_step_training:
-        patient = 3
+        patient = args.patience[1]
 
         for epoch in range(args.num_train_epochs):
             train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
@@ -354,7 +354,7 @@ def main(args):
                 if dev_metrics["NDCG@10"] > best_target:
                     print("Save the best model.")
                     best_target = dev_metrics["NDCG@10"]
-                    patient = 3
+                    patient = args.patience[1]
                     torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
                 else:
