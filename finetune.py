@@ -196,6 +196,7 @@ def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, sche
 
     model.train()
     gating_layer.train()
+
     loss_fn = nn.CrossEntropyLoss()
     gating_loss_fn = nn.CrossEntropyLoss()
 
@@ -208,26 +209,37 @@ def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, sche
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
             gating_vector, total_loss, attr_loss, total_scores, attr_scores, = model.forward(**batch,
                                                                                              loss_reduction="none",
-                                                                                             gating_method=args.gating_method)
+                                                                                             gating_method=args.gating_method,
+                                                                                             )
 
-            gating_weight = gating_layer(gating_vector)  # (bs, num_attr)
-            gating_weight = torch.softmax(gating_weight, dim=-1)  # (bs, num_attr)
-            gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
-            gating_loss = gating_loss_fn(gating_weight, gating_label)
+        gating_weight = gating_layer(gating_vector)  # (bs, num_attr)
+        # gating_weight = torch.softmax(gating_weight, dim=-1)  # (bs, num_attr)
+        gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
+        gating_loss = gating_loss_fn(gating_weight, gating_label)  # (1)
 
         if args.jointly_gating:
+            gating_weight = torch.softmax(gating_weight, dim=-1)
+            scores = attr_scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
+            scores = scores.sum(dim=-1)
+            rec_loss = loss_fn(scores, label)
+
+            loss = rec_loss + args.alpha * gating_loss  # (bs,)
+        else:
+            gating_weight = torch.softmax(gating_weight, dim=-1)
             gating_weight = gating_weight.detach()
             scores = attr_scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
             scores = scores.sum(dim=-1)  # (bs, |I|)
-            total_loss = loss_fn(scores, label)
+            rec_loss = loss_fn(scores, label)
 
-        loss = total_loss + args.alpha * gating_loss
+            loss = rec_loss + args.alpha * gating_loss
 
         if wandb_logger is not None:
             gating_weight_ = gating_weight.detach().squeeze().cpu().numpy()
             wandb_logger.log({f"train_step_{train_step}/title_weight": gating_weight_[0]})
             wandb_logger.log({f"train_step_{train_step}/brand_weight": gating_weight_[1]})
             wandb_logger.log({f"train_step_{train_step}/category_weight": gating_weight_[2]})
+            wandb_logger.log({f"train_step_{train_step}/rec_loss": rec_loss.item()})
+            wandb_logger.log({f"train_step_{train_step}/gating_loss": gating_loss.item()})
             wandb_logger.log({f"train_step_{train_step}/loss": loss.item()})
             epoch_losses.append(loss.item())
 
@@ -392,12 +404,10 @@ def main(args):
         for param in model.longformer.embeddings.word_embeddings.parameters():
             param.requires_grad = False
 
-
     model.to(args.device)  # send item embeddings to device
 
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
-
 
     if args.server != "local":
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
@@ -458,9 +468,13 @@ def main(args):
 
     test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
+
     if args.gating:
         print("Gating layer is enabled.")
         model.config.attribute_agg_method = "none"
+
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings)
 
     if wandb_logger is not None:
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})

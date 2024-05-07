@@ -64,6 +64,12 @@ def train_gating_layer_epoch(mars, gating_layer, dataloader, optimizer, schedule
     mars.eval()
     gating_layer.train()
 
+    if args.loss_type == "ce":
+        loss_fn = nn.CrossEntropyLoss()
+    elif args.loss_type == "mse":
+        loss_fn = nn.MSELoss()
+    else:
+        raise ValueError("Unknown loss type.")
     gating_loss_fn = nn.CrossEntropyLoss()
 
     for step, batch in enumerate(tqdm(dataloader, ncols=100, desc=f"[Train] Epoch {epoch}")):
@@ -75,9 +81,33 @@ def train_gating_layer_epoch(mars, gating_layer, dataloader, optimizer, schedule
                                                                                             loss_reduction="none",
                                                                                             gating_method=args.gating_method)
         gating_weight = gating_layer(gating_vector)
-        gating_weight = torch.softmax(gating_weight, dim=-1)
         gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
-        loss = gating_loss_fn(gating_weight, gating_label)
+
+        if args.loss_type == "mse":
+            gating_weight = torch.softmax(gating_weight, dim=-1)
+            gating_loss = gating_loss_fn(gating_weight, gating_label)
+        elif args.loss_type == "ce":
+            gating_loss = gating_loss_fn(gating_weight, gating_label)
+        else:
+            raise ValueError("Unknown loss type.")
+
+        if args.jointly_gating:
+            gating_weight = torch.softmax(gating_weight, dim=-1)
+            attr_scores = attr_scores * gating_weight.unsqueeze(1)
+            scores = attr_scores.sum(dim=-1)
+            rec_loss = loss_fn(scores, batch["labels"])
+            loss = args.alpha * gating_loss + (1 - args.alpha) * rec_loss
+        else:
+            attr_scores = attr_scores.detach() * gating_weight.unsqueeze(1).detach()
+            scores = attr_scores.sum(dim=-1)
+            rec_loss = cross_entropy(scores, batch["labels"])
+            loss = gating_loss
+
+
+            if wandb_logger is not None:
+                wandb_logger.log({"train/gating_loss": gating_loss.item()})
+                wandb_logger.log({"train/rec_loss": rec_loss.item()})
+                wandb_logger.log({"train/loss": loss.item()})
 
         optimizer.zero_grad()
         loss.backward()
@@ -117,7 +147,8 @@ def evaluate_gating_layer(mars, gating_layer, dataloader, args, return_preds=Fal
         with autocast(dtype=torch.bfloat16, enabled=args.bf16), torch.no_grad():
             gating_vector, total_loss, attr_loss, total_scores, attr_scores, = mars.forward(**batch,
                                                                                             loss_reduction="none",
-                                                                                            gating_method=args.gating_method)
+                                                                                            gating_method=args.gating_method,
+                                                                                            labels=labels)
 
         gating_weight = gating_layer(gating_vector)
         gating_weight = torch.softmax(gating_weight, dim=-1)
@@ -190,6 +221,13 @@ def main(args):
 
     path_output.mkdir(exist_ok=True, parents=True)
 
+    tag_list = [
+        args.gating_method, "only_gating", args.loss_type,
+    ]
+    if args.jointly_gating:
+        tag_list.append("jointly_gating")
+        tag_list.append(f"alpha_{args.alpha}")
+
     global wandb_logger
     wandb_logger = wandb.init(
         project="MarsGating",
@@ -197,7 +235,7 @@ def main(args):
         name=path_corpus.name + time.strftime("%Y%m%d-%H%M%S"),
         group=path_corpus.name + "only_gating",
         config=vars(args),
-        tags=[args.gating_method, "only_gating"],
+        tags=tag_list,
     )
 
     doc_tuples = [
@@ -249,10 +287,9 @@ def main(args):
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1000, gamma=0.1)
 
     best_target = 0
-    patient = 5
+    patient = 3
 
     zero_metrics = evaluate_gating_layer(model, gating_layer, test_loader, args, return_preds=False, mode="val")
-    print("T")
     print(zero_metrics)
     for epoch in range(args.num_train_epochs):
         train_loss = train_gating_layer_epoch(model, gating_layer, train_loader, optimizer, scheduler, epoch, args)
@@ -260,13 +297,15 @@ def main(args):
         print(val_metrics)
         if val_metrics[args.early_stop_metric] > best_target:
             best_target = val_metrics[args.early_stop_metric]
-            patient = 5
+            torch.save(gating_layer.state_dict(), path_output / "best_gating.pt")
+            patient = 3
         else:
             patient -= 1
 
         if patient == 0:
             break
 
+    gating_layer.load_state_dict(torch.load(path_output / "best_gating.pt"))
     test_metrics, predictions, labels, test_weight = evaluate_gating_layer(model, gating_layer, test_loader,
                                                                            args,
                                                                            return_preds=True, mode="test")
@@ -293,7 +332,11 @@ def parse_finetune_args():
     parser.add_argument("--linear_out", type=int, default=256)
     parser.add_argument("--group_name", type=str, default=None)
     # gating
+    parser.add_argument("--label", type=str, choices=['softmax', 'linear'], default='softmax')
     parser.add_argument("--gating_method", type=str, default="cls", choices=["cls", "mean"])
+    parser.add_argument("--jointly_gating", action="store_true")
+    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--loss_type", type=str, default="ce", choices=["ce", "mse"])
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)

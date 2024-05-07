@@ -49,7 +49,7 @@ def parse_finetune_args():
     parser.add_argument("--gating", action="store_true")
     parser.add_argument("--gating_method", type=str, choices=["cls", "mean"])
     parser.add_argument("--jointly_gating", action="store_true")
-    parser.add_argument("--alpha", type=float, default=0.5)
+    parser.add_argument("--alpha", type=float, default=1)
     # path and file
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
