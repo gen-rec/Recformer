@@ -213,7 +213,6 @@ def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, sche
                                                                                              )
 
         gating_weight = gating_layer(gating_vector)  # (bs, num_attr)
-        # gating_weight = torch.softmax(gating_weight, dim=-1)  # (bs, num_attr)
         gating_label = torch.softmax(-attr_loss, dim=-1)  # (bs, num_attr)
         gating_loss = gating_loss_fn(gating_weight, gating_label)  # (1)
 
@@ -225,16 +224,21 @@ def train_one_epoch_with_gating(model, gating_layer, dataloader, optimizer, sche
 
             loss = rec_loss + args.alpha * gating_loss  # (bs,)
         else:
-            gating_weight = torch.softmax(gating_weight, dim=-1)
-            gating_weight = gating_weight.detach()
-            scores = attr_scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
-            scores = scores.sum(dim=-1)  # (bs, |I|)
-            rec_loss = loss_fn(scores, label)
+            # Temporary Option A
+            loss = total_loss + args.alpha * gating_loss
+            rec_loss = total_loss
 
-            loss = rec_loss + args.alpha * gating_loss
+            # TODO: Option C
+            # gating_weight = torch.softmax(gating_weight, dim=-1)
+            # gating_weight = gating_weight.detach()
+            # scores = attr_scores * gating_weight.unsqueeze(dim=1)  # (bs, |I|, num_attr)
+            # scores = scores.sum(dim=-1)  # (bs, |I|)
+            # rec_loss = loss_fn(scores, label)
+            #
+            # loss = rec_loss + args.alpha * gating_loss
 
         if wandb_logger is not None:
-            gating_weight_ = gating_weight.detach().squeeze().cpu().numpy()
+            gating_weight_ = torch.mean(gating_weight, dim=0).detach().cpu().tolist()
             wandb_logger.log({f"train_step_{train_step}/title_weight": gating_weight_[0]})
             wandb_logger.log({f"train_step_{train_step}/brand_weight": gating_weight_[1]})
             wandb_logger.log({f"train_step_{train_step}/category_weight": gating_weight_[2]})
@@ -284,7 +288,7 @@ def evaluate_with_gating(model, gating_layer, dataloader, args, return_preds=Fal
         all_scores.append(attr_scores.detach().cpu())
         all_labels.append(labels.detach().cpu())
 
-        res = ranker(attr_scores, labels)
+        res = ranker(attr_scores, labels.unsqueeze(dim=-1))
         metrics = {}
         for i, k in enumerate(args.metric_ks):
             metrics["NDCG@%d" % k] = res[2 * i]
@@ -409,16 +413,16 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    if args.server != "local":
-        item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
-        model.init_item_embedding(item_embeddings)
-        test_metrics = evaluate(model, test_loader, args)
-        if wandb_logger is not None:
-            wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-        print(f"Test set Zero-shot: {test_metrics}")
-
-        if args.zero_shot_only:
-            return
+    # if args.server != "local":
+    #     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    #     model.init_item_embedding(item_embeddings)
+    #     test_metrics = evaluate(model, test_loader, args)
+    #     if wandb_logger is not None:
+    #         wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+    #     print(f"Test set Zero-shot: {test_metrics}")
+    #
+    #     if args.zero_shot_only:
+    #         return
 
     best_target = float("-inf") if args.early_stop_metric != "loss" else float("inf")
     patient = 5
@@ -469,6 +473,9 @@ def main(args):
     test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
 
+    if wandb_logger is not None:
+        wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
+
     if args.gating:
         print("Gating layer is enabled.")
         model.config.attribute_agg_method = "none"
@@ -476,11 +483,9 @@ def main(args):
     item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
     model.init_item_embedding(item_embeddings)
 
-    if wandb_logger is not None:
-        wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
-
     if not args.one_step_training:
-        patient = 5
+        best_target = float("-inf") if args.early_stop_metric != "loss" else float("inf")
+        patient = 8
 
         for epoch in range(args.num_train_epochs):
 
@@ -505,6 +510,7 @@ def main(args):
                         best_target = loss
                         patient = 5
                         torch.save(model.state_dict(), path_output / "stage_2_best.pt")
+                        torch.save(gating_layer.state_dict(), path_output / "gating_best.pt")
 
                     else:
                         patient -= 1
@@ -517,6 +523,7 @@ def main(args):
                         best_target = dev_metrics[args.early_stop_metric]
                         patient = 5
                         torch.save(model.state_dict(), path_output / "stage_2_best.pt")
+                        torch.save(gating_layer.state_dict(), path_output / "gating_best.pt")
 
                     else:
                         patient -= 1
@@ -528,10 +535,16 @@ def main(args):
         print("Load best model in stage 2.")
         try:
             model.load_state_dict(torch.load(path_output / "stage_2_best.pt"))
+            if args.gating:
+                gating_layer.load_state_dict(torch.load(path_output / "gating_best.pt"))
         except FileNotFoundError:
             print("No best model in stage 2. Use the latest model.")
 
-        test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
+        if args.gating:
+            test_metrics, predictions, labels, weights = evaluate_with_gating(model, gating_layer, test_loader, args,
+                                                                     return_preds=True)
+        else:
+            test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
         print(f"Stage-2 Test set: {test_metrics}")
 
         if wandb_logger is not None:
@@ -544,10 +557,18 @@ def main(args):
         labels = labels.tolist()
 
         output = {}
-        for user, prediction, label in zip(users, predictions, labels):
-            prediction = list(map(id2item.get, prediction))
-            label = id2item[label]
-            output[user] = {"predictions": prediction, "target": label}
+        if args.gating:
+            weights = weights.tolist()
+            for user, prediction, label, weight in zip(users, predictions, labels, weights):
+                prediction = list(map(id2item.get, prediction))
+                label = id2item[label]
+                output[user] = {"predictions": prediction, "target": label, "weights": weight}
+        else:
+            for user, prediction, label in zip(users, predictions, labels):
+                prediction = list(map(id2item.get, prediction))
+                label = id2item[label]
+                output[user] = {"predictions": prediction, "target": label}
+
 
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
 

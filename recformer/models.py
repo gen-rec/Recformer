@@ -855,10 +855,11 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
                 attr_loss = torch.stack(attr_loss, dim=-1)  # (bs, num_attr)
                 total_scores = scores.mean(dim=-1)  # (bs, |I|)
                 total_loss = loss_fct(total_scores, labels)
+                total_loss = torch.mean(total_loss)
 
                 return (
                     gating_vector,  # (bs, hidden_size)
-                    total_loss,  # (bs)
+                    total_loss,  # (1)
                     attr_loss,  # (bs, num_attr),
                     total_scores,  # (bs, |I|),
                     scores,  # (bs, |I|, num_attr)
