@@ -36,6 +36,17 @@ def load_data(args):
         if k in item2id:
             item_meta_dict_filted[k] = v
 
+    # Delete certain attributes
+    if args.exclude_attr is not None:
+        item_meta_dict_filted = {
+            k: {
+                k2: v2
+                for k2, v2 in v.items()
+                if k2 not in args.exclude_attr
+            }
+            for k, v in item_meta_dict_filted.items()
+        }
+
     return train, val, test, item_meta_dict_filted, item2id, id2item, user2id, id2user
 
 
@@ -94,6 +105,8 @@ def parse_finetune_args():
 
     parser.add_argument("--loss_weight", type=eval, default=None)
     parser.add_argument("--patience", type=eval, default=None)
+    parser.add_argument("--exclude_attr", nargs="+", type=str, default=None)
+    parser.add_argument("--notes", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -103,7 +116,7 @@ def parse_finetune_args():
         args.loss_weight = None
 
     if args.loss_weight is None:
-        args.loss_weight = [1 / 3] * 3
+        raise ValueError("Loss weight is required")
 
     if args.patience is None:
         args.patience = (3, 5)

@@ -760,7 +760,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         self.sim = Similarity(config)
         # Initialize weights and apply final processing
         self.item_embedding = None
-        self.loss_weight = nn.Parameter(torch.softmax(torch.tensor(loss_weight, dtype=torch.float), dim=-1), requires_grad=False)
+        self.loss_weight = nn.Parameter(torch.tensor(loss_weight, dtype=torch.float), requires_grad=False)
         self.post_init()
 
         if config.attribute_agg_method == "linear":
@@ -823,25 +823,6 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
         pooler_output = outputs.pooler_output  # (bs, attr_num, items_max, hidden_size)
         pooler_output_mask = outputs.mask  # (bs, attr_num, items_max)  True for valid tokens
 
-        if labels is None:
-            scores = self.similarity_score(pooler_output)  # (bs, |I|, attr_num, items_max)
-
-            all_item_mask = torch.zeros(
-                (scores.shape[1], scores.shape[2], 1), dtype=torch.bool, device=scores.device
-            )  # (|I|, attr_num, 1)
-            final_mask = torch.add(pooler_output_mask.unsqueeze(1), all_item_mask.unsqueeze(0))
-            scores[final_mask] = -torch.inf
-
-            scores = reduce_session(
-                scores,
-                self.config.session_reduce_method,
-                self.config.session_reduce_topk,
-                mask=final_mask,
-                attribute_agg_method=self.config.attribute_agg_method,
-                linear_agg_module=self.linear_agg_module,
-            )  # (bs, |I|, attr_num)
-            return scores
-
         loss_fct = CrossEntropyLoss()
 
         if self.config.finetune_negative_sample_size <= 0:  ## using full softmax
@@ -868,13 +849,11 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             for i, score in enumerate(scores):
                 l = loss_fct(score, labels)
                 losses.append(l)
+
+            losses.append(loss_fct(scores.mean(0), labels))
             losses = torch.stack(losses)
 
             loss = torch.dot(losses, self.loss_weight)
-
-            with torch.no_grad():
-                scores = scores.mean(0)
-                cat_loss = loss_fct(scores, labels)
 
         else:  ## using sampled softmax
             raise NotImplementedError("Negative sampling disabled")
@@ -891,7 +870,7 @@ class RecformerForSeqRec(LongformerPreTrainedModel):
             target = torch.zeros_like(labels, device=labels.device)
             loss = loss_fct(scores, target)
 
-        return cat_loss, loss, losses
+        return loss, losses, scores
 
 
 def reduce_session(

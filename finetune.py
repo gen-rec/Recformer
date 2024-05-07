@@ -117,11 +117,12 @@ def evaluate(model, dataloader, args, return_preds=False):
         for k, v in batch.items():
             batch[k] = v.to(args.device)
         labels = labels.to(args.device)
+        batch["labels"] = labels.squeeze(-1)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            scores_raw = model(**batch)  # (bs, |I|, num_attr, items_max)
+            loss, losses, scores_raw = model(**batch)  # (bs, |I|, num_attr, items_max)
 
-        scores = scores_raw.mean(-1)
+        scores = scores_raw.mean(0)
 
         all_scores.append(scores.detach().clone().cpu())
         all_labels.append(labels.detach().clone().cpu())
@@ -136,15 +137,23 @@ def evaluate(model, dataloader, args, return_preds=False):
             metrics["Recall@%d" % k] = res[2 * i + 1]
         metrics["MRR"] = res[-3]
         metrics["AUC"] = res[-2]
-        metrics["loss"] = res[-1]
 
-        for i, k in enumerate(["title", "brand", "category"]):
-            res = ranker(scores_raw[:, :, i], labels)
+        metrics["loss"] = loss.item()
+        metrics["loss_concat"] = losses[-1].item()
+
+        attr_names = ["title", "brand", "category"]
+        if args.exclude_attr is not None:
+            for attr in args.exclude_attr:
+                attr_names.remove(attr)
+
+        assert len(attr_names) == scores_raw.size(0)
+        for score, attr_name in zip(scores_raw, attr_names):
+            res = ranker(score, labels)
 
             for j, l in enumerate(args.metric_ks):
-                metrics[f"{k}_NDCG@{l}"] = res[2 * j]
-                metrics[f"{k}_Recall@{l}"] = res[2 * j + 1]
-                metrics[f"{k}_loss"] = res[-1]
+                metrics[f"{attr_name}_NDCG@{l}"] = res[2 * j]
+                metrics[f"{attr_name}_Recall@{l}"] = res[2 * j + 1]
+                metrics[f"{attr_name}_loss"] = res[-1]
 
         for k, v in metrics.items():
             average_meter_set.update(k, v)
@@ -172,20 +181,24 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
             batch[k] = v.to(args.device)
 
         with autocast(dtype=torch.bfloat16, enabled=args.bf16):
-            cat_loss, loss, losses = model(**batch)
-            cat_loss: torch.Tensor
+            loss, losses, _ = model(**batch)
             loss: torch.Tensor
             losses: torch.Tensor
 
         if torch.any(torch.isnan(loss)):
             continue
 
+        attr_names = ["title", "brand", "category", "concat"]
+        if args.exclude_attr is not None:
+            for attr in args.exclude_attr:
+                attr_names.remove(attr)
+
         if wandb_logger is not None:
             log_item = [
                 (f"train_step_{train_step}/loss", loss.item()),
-                (f"train_step_{train_step}/loss_cat", cat_loss.item()),
             ]
-            for k, v in zip(["title", "brand", "category"], losses):
+            assert len(attr_names) == len(losses)
+            for k, v in zip(attr_names, losses):
                 log_item.append((f"train_step_{train_step}/loss_{k}", v.item()))
             wandb_logger.log(dict(log_item))
             epoch_losses.append(loss.item())
@@ -243,6 +256,7 @@ def main(args):
         name=server_random_word_and_date,
         group=args.group_name or path_corpus.name,
         config=vars(args),
+        notes=args.notes,
         tags=[
             path_corpus.name,
             f"pool_{args.pooler_type}",
