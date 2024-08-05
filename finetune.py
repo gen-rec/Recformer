@@ -1,3 +1,5 @@
+import json
+import pickle
 from datetime import datetime
 from pathlib import Path
 
@@ -16,7 +18,6 @@ from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, Re
 from utils import AverageMeterSet, Ranker, load_data, parse_finetune_args
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
-tokenizer_glb: RecformerTokenizer = None
 
 
 def load_config_tokenizer(args, item2id):
@@ -32,8 +33,10 @@ def load_config_tokenizer(args, item2id):
     config.pooler_type = args.pooler_type
     config.original_embedding = args.original_embedding
     config.global_attention_type = args.global_attention_type
-    config.session_reduce_topk = args.session_reduce_topk
-    config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
+    if hasattr(args, "session_reduce_topk"):
+        config.session_reduce_topk = args.session_reduce_topk
+    if hasattr(args, "session_reduce_weightedsim_temp"):
+        config.session_reduce_weightedsim_temp = args.session_reduce_weightedsim_temp
 
     tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
 
@@ -48,10 +51,10 @@ def load_config_tokenizer(args, item2id):
     return config, tokenizer
 
 
-def _par_tokenize_doc(doc):
+def _par_tokenize_doc(doc, tokenizer: RecformerTokenizer):
     item_id, item_attr = doc
 
-    input_ids, token_type_ids, attr_type_ids = tokenizer_glb.encode_item(item_attr)
+    input_ids, token_type_ids, attr_type_ids = tokenizer.encode_item(item_attr)
 
     return item_id, input_ids, token_type_ids, attr_type_ids
 
@@ -66,12 +69,12 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
 
     with torch.no_grad():
         for i in tqdm(
-            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
-            ncols=100,
-            desc="Encode all items",
+                range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+                ncols=100,
+                desc="Encode all items",
         ):
 
-            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
+            item_batch = [[item] for item in items[i: i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
@@ -99,8 +102,11 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     return item_embeddings
 
 
-def evaluate(model, dataloader, args):
+def evaluate(model, dataloader, args, path_output):
+
     model.eval()
+
+    evaluation_results = []
 
     ranker = Ranker(args.metric_ks)
     average_meter_set = AverageMeterSet()
@@ -129,7 +135,18 @@ def evaluate(model, dataloader, args):
         for k, v in metrics.items():
             average_meter_set.update(k, v)
 
+        sorted_scores, predictions = torch.sort(scores, dim=-1, descending=True)
+        for b in range(scores.shape[0]):
+            evaluation_results.append({
+                "labels": labels[b].tolist(),
+                "scores": sorted_scores[b].tolist(),
+                "predictions": predictions[b].tolist(),
+            })
+
     average_metrics = average_meter_set.averages()
+    if path_output is not None:
+        pickle.dump(evaluation_results, open(Path(path_output) / "evaluation_results.pkl", "wb"))
+        json.dump(average_metrics, open(Path(path_output) / "average_metrics.json", "w"), indent=1, ensure_ascii=False)
 
     return average_metrics
 
@@ -174,8 +191,6 @@ def main(args):
 
     train, val, test, item_meta_dict, item2id, id2item = load_data(args)
     config, tokenizer = load_config_tokenizer(args, item2id)
-    global tokenizer_glb
-    tokenizer_glb = tokenizer
 
     random_word_generator = RandomWord()
     random_word = random_word_generator.random_words(include_parts_of_speech=["noun", "verb"])[0]
@@ -205,7 +220,8 @@ def main(args):
     )
 
     doc_tuples = [
-        _par_tokenize_doc(doc) for doc in tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
+        _par_tokenize_doc(doc, tokenizer) for doc in
+        tqdm(item_meta_dict.items(), ncols=100, desc=f"[Tokenize] {path_corpus}")
     ]
     tokenized_items = {
         item2id[item_id]: [input_ids, token_type_ids, attr_type_ids]
@@ -246,10 +262,11 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    # test_metrics = evaluate(model, test_loader, args)
-    # if wandb_logger is not None:
-    #     wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-    # print(f"Test set Zero-shot: {test_metrics}")
+    test_metrics = evaluate(model, test_loader, args, path_output)
+    if wandb_logger is not None:
+        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+    print(f"Test set Zero-shot: {test_metrics}")
+
 
     best_target = float("-inf")
     patient = 5
@@ -305,7 +322,9 @@ def main(args):
                     print("Save the best model.")
                     best_target = dev_metrics["NDCG@10"]
                     patient = 3
-                    torch.save(model.state_dict(), path_output / "stage_2_best.pt")
+                    torch.save(model.state_dict(), path_ckpt)
+                    config.save_pretrained(path_output)
+
 
                 else:
                     patient -= 1
