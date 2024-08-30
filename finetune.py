@@ -1,28 +1,35 @@
 import json
-import os
-from argparse import ArgumentParser
 from datetime import datetime
-from multiprocessing import Pool
 from pathlib import Path
 
-from wonderwords import RandomWord
-
-import wandb
-
 import torch
+import wandb
 from pytorch_lightning import seed_everything
 from torch.cuda.amp import autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from wonderwords import RandomWord
 
 from collator import FinetuneDataCollatorWithPadding, EvalDataCollatorWithPadding
 from dataloader import RecformerTrainDataset, RecformerEvalDataset
 from optimization import create_optimizer_and_scheduler
 from recformer import RecformerModel, RecformerForSeqRec, RecformerTokenizer, RecformerConfig
-from utils import read_json, AverageMeterSet, Ranker, parse_args, load_data
+from utils import AverageMeterSet, Ranker, parse_args, load_data
 
 wandb_logger: wandb.sdk.wandb_run.Run | None = None
 tokenizer_glb: RecformerTokenizer = None
+
+def load_config_tokenizer(args, item2id):
+    config = RecformerConfig.from_pretrained(args.model_name_or_path)
+    config.max_attr_num = 3
+    config.max_attr_length = 32
+    config.max_item_embeddings = 51
+    config.attention_window = [64] * 12
+    config.max_token_num = args.max_token_num
+    config.item_num = len(item2id)
+    config.finetune_negative_sample_size = args.finetune_negative_sample_size
+    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
+    return config, tokenizer
 
 
 def _par_tokenize_doc(doc):
@@ -42,9 +49,13 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     item_embeddings = []
 
     with torch.no_grad():
-        for i in tqdm(range(0, len(items), args.batch_size), ncols=100, desc="Encode all items"):
+        for i in tqdm(
+            range(0, len(items), args.batch_size * args.encode_item_batch_size_multiplier),
+            ncols=100,
+            desc="Encode all items",
+        ):
 
-            item_batch = [[item] for item in items[i: i + args.batch_size]]
+            item_batch = [[item] for item in items[i : i + args.batch_size * args.encode_item_batch_size_multiplier]]
 
             inputs = tokenizer.batch_encode(item_batch, encode_item=False)
 
@@ -60,11 +71,14 @@ def encode_all_items(model: RecformerModel, tokenizer: RecformerTokenizer, token
     return item_embeddings
 
 
-def evaluate(model, dataloader, args):
+def evaluate(model, dataloader, args, return_preds=False):
     model.eval()
 
     ranker = Ranker(args.metric_ks)
     average_meter_set = AverageMeterSet()
+
+    all_scores = []
+    all_labels = []
 
     for batch, labels in tqdm(dataloader, ncols=100, desc="Evaluate"):
 
@@ -72,8 +86,13 @@ def evaluate(model, dataloader, args):
             batch[k] = v.to(args.device)
         labels = labels.to(args.device)
 
-        with torch.no_grad():
-            scores = model(**batch)
+        with torch.no_grad(), autocast(dtype=torch.bfloat16, enabled=args.bf16):
+            scores = model(**batch)  # (bs, |I|, num_attr, items_max)
+
+        all_scores.append(scores.detach().clone().cpu())
+        all_labels.append(labels.detach().clone().cpu())
+
+        assert torch.isnan(scores).sum() == 0, "NaN in scores."
 
         res = ranker(scores, labels)
 
@@ -88,6 +107,12 @@ def evaluate(model, dataloader, args):
             average_meter_set.update(k, v)
 
     average_metrics = average_meter_set.averages()
+
+    if return_preds:
+        all_scores = torch.cat(all_scores, dim=0)
+        all_labels = torch.cat(all_labels, dim=0).squeeze()
+        all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
+        return average_metrics, all_predictions, all_labels
 
     return average_metrics
 
@@ -129,7 +154,8 @@ def train_one_epoch(model, dataloader, optimizer, scheduler, args, train_step: i
 
 def main(args):
     print(args)
-    seed_everything(42)
+
+    seed_everything(args.seed, workers=True)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
     train, val, test, item_meta_dict, item2id, id2item, id2user = load_data(args)
@@ -145,7 +171,7 @@ def main(args):
             continue
         else:
             break
-    server_random_word_and_date = args.server + "_" + random_word + "_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    server_random_word_and_date = random_word + "_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     path_corpus = Path(args.data_path)
     path_output = Path(args.output_dir) / random_word
@@ -157,8 +183,7 @@ def main(args):
 
     global wandb_logger
     wandb_logger = wandb.init(
-        project="AfterSIGIR",
-        entity="gen-rec",
+        project="Recformer",
         name=server_random_word_and_date,
         group=args.group or path_corpus.name,
         config=vars(args),
@@ -185,12 +210,16 @@ def main(args):
     test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
-    dev_loader = DataLoader(val_data, batch_size=args.batch_size, collate_fn=val_data.collate_fn)
-    test_loader = DataLoader(test_data, batch_size=args.batch_size, collate_fn=test_data.collate_fn)
+    dev_loader = DataLoader(
+        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn
+    )
+    test_loader = DataLoader(
+        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
+    )
 
     model = RecformerForSeqRec(config)
-    pretrain_ckpt = torch.load(args.pretrain_ckpt)
-    model.load_state_dict(pretrain_ckpt, strict=False)
+    pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
+    print(model.load_state_dict(pretrain_ckpt, strict=False))
     model.to(args.device)
 
     if args.fix_word_embedding:
@@ -207,13 +236,13 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    if args.fp16:
-        scaler = torch.cuda.amp.GradScaler()
-    else:
-        scaler = None
-
     test_metrics = evaluate(model, test_loader, args)
-    print(f"Test set: {test_metrics}")
+    if wandb_logger is not None:
+        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
+    print(f"Test set Zero-shot: {test_metrics}")
+
+    if args.zero_shot_only:
+        return
 
     best_target = float("-inf")
     patient = 5
@@ -223,17 +252,20 @@ def main(args):
         item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
         model.init_item_embedding(item_embeddings)
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
+        train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = evaluate(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
+            if wandb_logger is not None:
+                wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
+
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
                 patient = 5
-                torch.save(model.state_dict(), path_output / "stage_1_best_model.pt")
+                torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
             else:
                 patient -= 1
@@ -241,73 +273,64 @@ def main(args):
                     break
 
     print("Load best model in stage 1.")
-    model.load_state_dict(torch.load(path_output / "stage_1_best_model.pt"))
+    model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
 
     test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
     if wandb_logger is not None:
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
 
-    patient = 3
+    if not args.one_step_training:
+        patient = 3
 
-    for epoch in range(args.num_train_epochs):
+        for epoch in range(args.num_train_epochs):
 
-        train_one_epoch(model, train_loader, optimizer, scheduler, scaler, args)
+            train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
-        if (epoch + 1) % args.verbose == 0:
-            dev_metrics = evaluate(model, dev_loader, args)
-            print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+            if (epoch + 1) % args.verbose == 0:
+                dev_metrics = evaluate(model, dev_loader, args)
+                print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
 
-            if dev_metrics["NDCG@10"] > best_target:
-                print("Save the best model.")
-                best_target = dev_metrics["NDCG@10"]
-                patient = 3
-                torch.save(model.state_dict(), path_output / "stage_2_best_model.pt")
+                if wandb_logger is not None:
+                    wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
 
-            else:
-                patient -= 1
-                if patient == 0:
-                    break
+                if dev_metrics["NDCG@10"] > best_target:
+                    print("Save the best model.")
+                    best_target = dev_metrics["NDCG@10"]
+                    patient = 3
+                    torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
-    print("Load best model in stage 2.")
-    try:
-        model.load_state_dict(torch.load(path_output / "stage_2_best.pt"))
-    except FileNotFoundError:
-        print("No best model in stage 2. Use the latest model.")
+                else:
+                    patient -= 1
+                    if patient == 0:
+                        break
 
-    test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
-    print(f"Stage-2 Test set: {test_metrics}")
+        print("Load best model in stage 2.")
+        try:
+            model.load_state_dict(torch.load(path_output / "stage_2_best.pt"))
+        except FileNotFoundError:
+            print("No best model in stage 2. Use the latest model.")
 
-    if wandb_logger is not None:
-        wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
+        test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
+        print(f"Stage-2 Test set: {test_metrics}")
 
-    users = list(map(int, test.keys()))
-    users = list(map(id2user.get, users))
+        if wandb_logger is not None:
+            wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
 
-    predictions = predictions.tolist()
-    labels = labels.tolist()
+        users = list(map(int, test.keys()))
+        users = list(map(id2user.get, users))
 
-    output = {}
-    for user, prediction, label in zip(users, predictions, labels):
-        prediction = list(map(id2item.get, prediction))
-        label = id2item[label]
-        output[user] = {"predictions": prediction, "target": label}
+        predictions = predictions.tolist()
+        labels = labels.tolist()
 
-    json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
+        output = {}
+        for user, prediction, label in zip(users, predictions, labels):
+            prediction = list(map(id2item.get, prediction))
+            label = id2item[label]
+            output[user] = {"predictions": prediction, "target": label}
 
-def load_config_tokenizer(args, item2id):
-    config = RecformerConfig.from_pretrained(args.model_name_or_path)
-    config.max_attr_num = 3
-    config.max_attr_length = 32
-    config.max_item_embeddings = 51
-    config.attention_window = [64] * 12
-    config.max_token_num = args.max_token_num
-    config.item_num = len(item2id)
-    config.finetune_negative_sample_size = args.finetune_negative_sample_size
-    tokenizer = RecformerTokenizer.from_pretrained(args.model_name_or_path, config)
-    return config, tokenizer
+        json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
 
 
 if __name__ == "__main__":
-    arg = parse_args()
-    main(arg)
+    main(parse_args())

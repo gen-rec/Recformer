@@ -1,6 +1,7 @@
 import json
-from argparse import ArgumentParser
 import os
+from argparse import ArgumentParser
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -11,15 +12,16 @@ MAX_VAL = 1e4
 def parse_args():
     parser = ArgumentParser()
     # path and file
-    parser.add_argument("--server", type=str, required=True)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
-    parser.add_argument("--data_path", type=str, default=None, required=True)
+    parser.add_argument("--data_path", type=Path, default=None, required=True)
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--ckpt", type=str, default="best_model.bin")
     parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
     parser.add_argument("--train_file", type=str, default="train.json")
     parser.add_argument("--dev_file", type=str, default="val.json")
     parser.add_argument("--test_file", type=str, default="test.json")
+    parser.add_argument("--user2id_file", type=str, default="umap.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
 
@@ -40,16 +42,19 @@ def parse_args():
     parser.add_argument("--num_train_epochs", type=int, default=16)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
     parser.add_argument("--finetune_negative_sample_size", type=int, default=1000)
-    parser.add_argument("--metric_ks", nargs="+", type=int, default=[10, 50], help="ks for Metric@k")
+    parser.add_argument("--metric_ks", nargs="+", type=int, default=[1, 5, 10, 20, 50], help="ks for Metric@k")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--warmup_steps", type=int, default=100)
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fix_word_embedding", action="store_true")
     parser.add_argument("--verbose", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--eval_test_batch_size_multiplier", type=int, default=1)
+    parser.add_argument("--encode_item_batch_size_multiplier", type=int, default=4)
+    parser.add_argument("--zero_shot_only", action="store_true")
+    parser.add_argument("--one_step_training", action="store_true")
 
     args = parser.parse_args()
     return args
