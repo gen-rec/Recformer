@@ -112,7 +112,7 @@ def evaluate(model, dataloader, args, return_preds=False):
         all_scores = torch.cat(all_scores, dim=0)
         all_labels = torch.cat(all_labels, dim=0).squeeze()
         all_predictions = torch.topk(all_scores, k=max(args.metric_ks), dim=1).indices
-        return average_metrics, all_predictions, all_labels
+        return average_metrics, all_scores, all_predictions, all_labels
 
     return average_metrics
 
@@ -311,7 +311,7 @@ def main(args):
         except FileNotFoundError:
             print("No best model in stage 2. Use the latest model.")
 
-        test_metrics, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
+        test_metrics, scores, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
         print(f"Stage-2 Test set: {test_metrics}")
 
         if wandb_logger is not None:
@@ -330,6 +330,7 @@ def main(args):
             output[user] = {"predictions": prediction, "target": label}
 
         json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
+        torch.save(scores, path_output / "scores.pt")
 
 
 if __name__ == "__main__":
