@@ -15,7 +15,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pretrain_ckpt", type=str, default=None, required=True)
     parser.add_argument("--data_path", type=Path, default=None, required=True)
-    parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--output_dir", type=str, default="checkpoints/_multi_datasets")
     parser.add_argument("--ckpt", type=str, default="best_model.bin")
     parser.add_argument("--model_name_or_path", type=str, default="allenai/longformer-base-4096")
     parser.add_argument("--train_file", type=str, default="train.json")
@@ -62,9 +62,10 @@ def parse_args():
 
 def load_data(args):
     train = read_json(os.path.join(args.data_path, args.train_file), True)
-    val = read_json(os.path.join(args.data_path, args.dev_file), True)
-    test = read_json(os.path.join(args.data_path, args.test_file), True)
+    vals = read_json(os.path.join(args.data_path, args.dev_file), None)
+    tests = read_json(os.path.join(args.data_path, args.test_file), None)
     item_meta_dict = json.load(open(os.path.join(args.data_path, args.meta_file)))
+    join_info = json.load(open(os.path.join(args.data_path, "join_info.json")))
 
     item2id = read_json(os.path.join(args.data_path, args.item2id_file))
     id2item = {v: k for k, v in item2id.items()}
@@ -75,17 +76,19 @@ def load_data(args):
             item_meta_dict_filted[k] = v
     id2user = {v: k for k, v in item2id.items()}
 
-    return train, val, test, item_meta_dict_filted, item2id, id2item, id2user
+    return train, vals, tests, item_meta_dict_filted, item2id, id2item, id2user, join_info
 
 
 def read_json(path, as_int=False):
     with open(path, "r") as f:
         raw = json.load(f)
-        if as_int:
-            data = dict((int(key), value) for (key, value) in raw.items())
+        if as_int is None:
+            data = [dict((int(key), value) for (key, value) in line.items()) for line in raw]
         else:
-            data = dict((key, value) for (key, value) in raw.items())
-        del raw
+            if as_int:
+                data = dict((int(key), value) for (key, value) in raw.items())
+            else:
+                data = dict((key, value) for (key, value) in raw.items())
         return data
 
 

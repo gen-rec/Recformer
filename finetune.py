@@ -1,4 +1,3 @@
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -158,7 +157,7 @@ def main(args):
     seed_everything(args.seed, workers=True)
     args.device = torch.device("cuda:{}".format(args.device)) if args.device >= 0 else torch.device("cpu")
 
-    train, val, test, item_meta_dict, item2id, id2item, id2user = load_data(args)
+    train, vals, tests, item_meta_dict, item2id, id2item, id2user, join_info = load_data(args)
     config, tokenizer = load_config_tokenizer(args, item2id)
 
     global tokenizer_glb
@@ -186,7 +185,7 @@ def main(args):
         project="Recformer",
         name=server_random_word_and_date,
         group=args.group or path_corpus.name,
-        config=vars(args),
+        config=vars(args) | {"dataset_names": join_info["datasets"]},
         tags=[
             path_corpus.name,
             f"seed_{args.seed}",
@@ -206,16 +205,15 @@ def main(args):
     eval_data_collator = EvalDataCollatorWithPadding(tokenizer, tokenized_items)
 
     train_data = RecformerTrainDataset(train, collator=finetune_data_collator)
-    val_data = RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator)
-    test_data = RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator)
+    vals_data = []
+    tests_data = []
+    for val, test in zip(vals, tests):
+        vals_data.append(RecformerEvalDataset(train, val, test, mode="val", collator=eval_data_collator))
+        tests_data.append(RecformerEvalDataset(train, val, test, mode="test", collator=eval_data_collator))
 
     train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=train_data.collate_fn)
-    dev_loader = DataLoader(
-        val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn
-    )
-    test_loader = DataLoader(
-        test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn
-    )
+    val_loaders = [DataLoader(val_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=val_data.collate_fn) for val_data in vals_data]
+    test_loaders = [DataLoader(test_data, batch_size=args.batch_size * args.eval_test_batch_size_multiplier, collate_fn=test_data.collate_fn) for test_data in tests_data]
 
     model = RecformerForSeqRec(config)
     pretrain_ckpt = torch.load(args.pretrain_ckpt, map_location="cpu")
@@ -236,16 +234,23 @@ def main(args):
     num_train_optimization_steps = int(len(train_loader) / args.gradient_accumulation_steps) * args.num_train_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(model, num_train_optimization_steps, args)
 
-    test_metrics = evaluate(model, test_loader, args)
-    if wandb_logger is not None:
-        wandb_logger.log({f"zero-shot/{k}": v for k, v in test_metrics.items()})
-    print(f"Test set Zero-shot: {test_metrics}")
+    test_metrics = []
+    for i, test_loader in enumerate(test_loaders, start=1):
+        print(f"Test set {i} / {len(test_loaders)}")
+        test_metric = evaluate(model, test_loader, args)
+        test_metrics.append(test_metric)
+
+        if wandb_logger is not None:
+            wandb_logger.log({f"zero-shot/dataset-{i}/{k}": v for k, v in test_metric.items()})
+        print(f"Test set {i} Zero-shot: {test_metric}")
 
     if args.zero_shot_only:
         return
 
     best_target = float("-inf")
     patient = 5
+
+    user_count = join_info["user_count"]
 
     for epoch in range(args.num_train_epochs):
 
@@ -255,15 +260,22 @@ def main(args):
         train_one_epoch(model, train_loader, optimizer, scheduler, args, 1)
 
         if (epoch + 1) % args.verbose == 0:
-            dev_metrics = evaluate(model, dev_loader, args)
-            print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+            dev_metrics = []
+            for i, val_loader in enumerate(val_loaders, start=1):
+                print(f"Dev set {i} / {len(val_loaders)}")
+                dev_metric = evaluate(model, val_loader, args)
+                dev_metrics.append(dev_metric)
+                if wandb_logger is not None:
+                    wandb_logger.log({f"dev_step_1/dataset-{i}/{k}": v for k, v in dev_metric.items()})
+                print(f"Epoch: {epoch}. Dev set {i} : {dev_metric}")
 
-            if wandb_logger is not None:
-                wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
+            ndcg10 = 0.0
+            for dev_metric, count in zip(dev_metrics, user_count):
+                ndcg10 += dev_metric["NDCG@10"] * (count / sum(user_count))
 
-            if dev_metrics["NDCG@10"] > best_target:
+            if ndcg10 > best_target:
                 print("Save the best model.")
-                best_target = dev_metrics["NDCG@10"]
+                best_target = ndcg10
                 patient = 5
                 torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
@@ -275,10 +287,16 @@ def main(args):
     print("Load best model in stage 1.")
     model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
 
-    test_metrics = evaluate(model, test_loader, args)
-    print(f"Stage-1 Test set: {test_metrics}")
-    if wandb_logger is not None:
-        wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
+    # Test
+    test_metrics = []
+    for i, test_loader in enumerate(test_loaders, start=1):
+        print(f"Test set {i} / {len(test_loaders)}")
+        test_metric = evaluate(model, test_loader, args)
+        test_metrics.append(test_metric)
+
+        if wandb_logger is not None:
+            wandb_logger.log({f"stage_1_test/dataset-{i}/{k}": v for k, v in test_metric.items()})
+        print(f"Test set {i} Stage-1: {test_metric}")
 
     if not args.one_step_training:
         patient = 3
@@ -288,15 +306,22 @@ def main(args):
             train_one_epoch(model, train_loader, optimizer, scheduler, args, 2)
 
             if (epoch + 1) % args.verbose == 0:
-                dev_metrics = evaluate(model, dev_loader, args)
-                print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+                dev_metrics = []
+                for i, val_loader in enumerate(val_loaders, start=1):
+                    print(f"Dev set {i} / {len(val_loaders)}")
+                    dev_metric = evaluate(model, val_loader, args)
+                    dev_metrics.append(dev_metric)
+                    if wandb_logger is not None:
+                        wandb_logger.log({f"dev_step_2/dataset-{i}/{k}": v for k, v in dev_metric.items()})
+                    print(f"Epoch: {epoch}. Dev set {i} : {dev_metric}")
 
-                if wandb_logger is not None:
-                    wandb_logger.log({f"dev_step_2/{k}": v for k, v in dev_metrics.items()})
+                ndcg10 = 0.0
+                for dev_metric, count in zip(dev_metrics, user_count):
+                    ndcg10 += dev_metric["NDCG@10"] * (count / sum(user_count))
 
-                if dev_metrics["NDCG@10"] > best_target:
+                if ndcg10 > best_target:
                     print("Save the best model.")
-                    best_target = dev_metrics["NDCG@10"]
+                    best_target = ndcg10
                     patient = 3
                     torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
@@ -311,26 +336,16 @@ def main(args):
         except FileNotFoundError:
             print("No best model in stage 2. Use the latest model.")
 
-        test_metrics, scores, predictions, labels = evaluate(model, test_loader, args, return_preds=True)
-        print(f"Stage-2 Test set: {test_metrics}")
+        # Test
+        test_metrics = []
+        for i, test_loader in enumerate(test_loaders, start=1):
+            print(f"Test set {i} / {len(test_loaders)}")
+            test_metric = evaluate(model, test_loader, args)
+            test_metrics.append(test_metric)
 
-        if wandb_logger is not None:
-            wandb_logger.log({f"stage_2_test/{k}": v for k, v in test_metrics.items()})
-
-        users = list(map(int, test.keys()))
-        users = list(map(id2user.get, users))
-
-        predictions = predictions.tolist()
-        labels = labels.tolist()
-
-        output = {}
-        for user, prediction, label in zip(users, predictions, labels):
-            prediction = list(map(id2item.get, prediction))
-            label = id2item[label]
-            output[user] = {"predictions": prediction, "target": label}
-
-        json.dump(output, open(path_output / "predictions.json", "w"), indent=1, ensure_ascii=False)
-        torch.save(scores, path_output / "scores.pt")
+            if wandb_logger is not None:
+                wandb_logger.log({f"stage_2_test/dataset-{i}/{k}": v for k, v in test_metric.items()})
+            print(f"Test set {i} Stage-2: {test_metric}")
 
 
 if __name__ == "__main__":
