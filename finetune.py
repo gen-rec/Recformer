@@ -276,6 +276,9 @@ def main(args):
     print("Load best model in stage 1.")
     model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
 
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings)
+
     test_metrics = evaluate(model, test_loader, args)
     print(f"Stage-1 Test set: {test_metrics}")
     if wandb_logger is not None:
