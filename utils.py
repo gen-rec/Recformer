@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--user2id_file", type=str, default="umap.json")
     parser.add_argument("--item2id_file", type=str, default="smap.json")
     parser.add_argument("--meta_file", type=str, default="meta_data.json")
+    parser.add_argument("--patience", type=int, nargs=2, default=[5, 3])
 
     # data process
     parser.add_argument(

@@ -246,7 +246,7 @@ def main(args):
         return
 
     best_target = float("-inf")
-    patient = 5
+    patient = args.patience[0]
 
     for epoch in range(args.num_train_epochs):
 
@@ -265,8 +265,8 @@ def main(args):
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
-                patient = 5
                 torch.save(model.state_dict(), path_output / "stage_1_best.pt")
+                patient = args.patience[0]
 
             else:
                 patient -= 1
@@ -285,7 +285,7 @@ def main(args):
         wandb_logger.log({f"stage_1_test/{k}": v for k, v in test_metrics.items()})
 
     if not args.one_step_training:
-        patient = 3
+        patient = args.patience[1]
 
         for epoch in range(args.num_train_epochs):
 
@@ -301,7 +301,7 @@ def main(args):
                 if dev_metrics["NDCG@10"] > best_target:
                     print("Save the best model.")
                     best_target = dev_metrics["NDCG@10"]
-                    patient = 3
+                    patient = args.patience[1]
                     torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
                 else:
