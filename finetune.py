@@ -102,6 +102,7 @@ def evaluate(model, dataloader, args, return_preds=False):
             metrics["Recall@%d" % k] = res[2 * i + 1]
         metrics["MRR"] = res[-3]
         metrics["AUC"] = res[-2]
+        metrics["loss"] = res[-1]
 
         for k, v in metrics.items():
             average_meter_set.update(k, v)
