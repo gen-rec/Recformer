@@ -57,7 +57,14 @@ def parse_args():
     parser.add_argument("--zero_shot_only", action="store_true")
     parser.add_argument("--one_step_training", action="store_true")
 
+    # Merger
+    parser.add_argument("--models", type=Path, nargs="+", required=True)
+    parser.add_argument("--merge_type", type=str, required=True)
+    parser.add_argument("--density", type=float, default=0.25)
+    parser.add_argument("--weights", type=float, nargs="+", default=None)
+
     args = parser.parse_args()
+
     return args
 
 

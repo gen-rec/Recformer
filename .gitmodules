@@ -1,0 +1,3 @@
+[submodule "merger"]
+	path = ModelMerger
+	url = https://github.com/sudokim/ModelMerger
