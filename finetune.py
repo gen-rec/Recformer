@@ -258,6 +258,7 @@ def main(args):
         if (epoch + 1) % args.verbose == 0:
             dev_metrics = evaluate(model, dev_loader, args)
             print(f"Epoch: {epoch}. Dev set: {dev_metrics}")
+            torch.save(model.state_dict(), path_output / f"stage_1_epoch_{epoch:03d}.pt")
 
             if wandb_logger is not None:
                 wandb_logger.log({f"dev_step_1/{k}": v for k, v in dev_metrics.items()})
@@ -265,8 +266,8 @@ def main(args):
             if dev_metrics["NDCG@10"] > best_target:
                 print("Save the best model.")
                 best_target = dev_metrics["NDCG@10"]
-                torch.save(model.state_dict(), path_output / "stage_1_best.pt")
                 patient = args.patience[0]
+                torch.save(model.state_dict(), path_output / "stage_1_best.pt")
 
             else:
                 patient -= 1
