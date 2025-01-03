@@ -169,6 +169,8 @@ def main(args):
     # Only leave keys that are in models
     model_keys = set(models_ckpt[0].keys())
     pretrain_ckpt = {k: v for k, v in pretrain_ckpt.items() if k in model_keys}
+    for model in models_ckpt:
+        del model["item_embedding.weight"]
 
     merger = ModelMerger(models=models_ckpt, base_model=pretrain_ckpt)
 
