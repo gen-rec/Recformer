@@ -101,6 +101,7 @@ def evaluate(model, dataloader, args, return_preds=False):
             metrics["Recall@%d" % k] = res[2 * i + 1]
         metrics["MRR"] = res[-3]
         metrics["AUC"] = res[-2]
+        metrics["loss"] = res[-1]
 
         for k, v in metrics.items():
             average_meter_set.update(k, v)
@@ -248,7 +249,7 @@ def main(args):
         return
 
     best_target = float("-inf")
-    patient = 5
+    patient = args.patience[0]
 
     user_count = join_info["user_count"]
 
@@ -276,8 +277,8 @@ def main(args):
             if ndcg10 > best_target:
                 print("Save the best model.")
                 best_target = ndcg10
-                patient = 5
                 torch.save(model.state_dict(), path_output / "stage_1_best.pt")
+                patient = args.patience[0]
 
             else:
                 patient -= 1
@@ -286,6 +287,9 @@ def main(args):
 
     print("Load best model in stage 1.")
     model.load_state_dict(torch.load(path_output / "stage_1_best.pt"))
+
+    item_embeddings = encode_all_items(model.longformer, tokenizer, tokenized_items, args)
+    model.init_item_embedding(item_embeddings)
 
     # Test
     test_metrics = []
@@ -299,7 +303,7 @@ def main(args):
         print(f"Test set {i} Stage-1: {test_metric}")
 
     if not args.one_step_training:
-        patient = 3
+        patient = args.patience[1]
 
         for epoch in range(args.num_train_epochs):
 
@@ -322,7 +326,7 @@ def main(args):
                 if ndcg10 > best_target:
                     print("Save the best model.")
                     best_target = ndcg10
-                    patient = 3
+                    patient = args.patience[1]
                     torch.save(model.state_dict(), path_output / "stage_2_best.pt")
 
                 else:
